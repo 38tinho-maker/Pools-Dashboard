@@ -1,4 +1,4 @@
-import { VERSION, CHAINS, loadPositions, derive, keccak256 } from './core.js?v=1.0.0';
+import { VERSION, CHAINS, loadPositions, derive, keccak256 } from './core.js?v=1.0.1';
 
 // ---------- armazenamento local (só neste aparelho) ----------
 const store = {

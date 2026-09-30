@@ -2,7 +2,7 @@
 // Lê posições Uniswap v3 e v4 direto da blockchain (RPC público), usa The Graph
 // só para descobrir os IDs das posições v4 e DefiLlama para preços em US$.
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.0.1';
 
 export const CHAINS = {
   ethereum: {
@@ -182,7 +182,7 @@ async function tokenMeta(rpc, chain, addrs, cache) {
 async function readV3(key, chain, rpc, owners, meta) {
   const bal = await rpcBatch(rpc, owners.map((o) => call(chain.v3npm, 'balanceOf(address)', [o])));
   const idx = [];
-  owners.forEach((o, i) => { const n = Math.min(Number(words(bal[i])[0] || 0n), 100); for (let j = 0; j < n; j++) idx.push({ owner: o, j }); });
+  owners.forEach((o, i) => { const n = Number(words(bal[i])[0] || 0n); for (let j = n - 1; j >= 0 && j >= n - 1000; j--) idx.push({ owner: o, j }); });
   if (!idx.length) return [];
   const idsRes = await rpcBatch(rpc, idx.map((x) => call(chain.v3npm, 'tokenOfOwnerByIndex(address,uint256)', [x.owner, x.j])));
   const ids = idx.map((x, i) => ({ owner: x.owner, tokenId: words(idsRes[i])[0] })).filter((x) => x.tokenId !== undefined);

@@ -1,4 +1,4 @@
-# Pools LP · v1.0.0
+# Pools LP · v1.0.1
 
 Painel das suas posições de liquidez na **Uniswap v3 e v4** (Ethereum, Arbitrum, Base e Polygon), feito para abrir no iPhone. Os alertas chegam como notificação pelo app **ntfy**.
 
@@ -24,7 +24,7 @@ Para ver sem configurar nada, abra o site com `?demo` no fim do endereço.
 
 1. Abra esse endereço no **Safari**.
 2. Toque em **Compartilhar → Adicionar à Tela de Início**.
-3. Abra pelo ícone e toque na engrenagem para configurar:
+3. Abra pelo ícone e toque no botão de configurações (duas linhas com bolinhas, no canto superior direito):
    - **Carteiras:** apelido e endereço `0x…`. Pode adicionar várias.
    - **Chave The Graph:** só é necessária para posições **v4**. As v3 são lidas direto da blockchain.
    - **Redes:** marque as que você usa.
