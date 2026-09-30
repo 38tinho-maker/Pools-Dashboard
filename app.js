@@ -1,380 +1,381 @@
-import { VERSION, CHAINS, loadPositions, derive, keccak256 } from './core.js?v=1.0.0';
+// Radar Mobile: suas posições da Hyperliquid no celular. Somente leitura (sem chave privada, sem ordens).
+// O endereço fica só neste aparelho (localStorage). Nada vem preenchido.
+import { hlState, hlOpenOrders, hlFills, hlFunding, hlFees, hlMarket, isAddress } from './lib/hyperliquid.js';
+import { slimFill, slimFund, slimOrder, buildTrades } from './lib/hltrades.js';
+import { ladder, restQty, origQty } from './lib/partials.js';
+import { fmtPrice, setPriceLocale } from './lib/format.js';
+import { t as tr, setLang, lang, loc, month, patName, defaultLang } from './lib/i18n.js';
+import { extStore, bestWorst } from './lib/runext.js';
+import { finKind, finModel, finPosAt, finResult, finList } from './lib/finished.js';
 
-// ---------- armazenamento local (só neste aparelho) ----------
-const store = {
-  get(k, d) { try { const v = localStorage.getItem('lp.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem('lp.' + k, JSON.stringify(v)); } catch { /* modo privado */ } },
-};
-const cfg = {
-  wallets: store.get('wallets', []),
-  graphKey: store.get('graphKey', ''),
-  chains: store.get('chains', Object.keys(CHAINS)),
-  alerts: store.get('alerts', {}),
-  alertDefault: store.get('alertDefault', 5),
-  rpc: store.get('rpc', {}),
-};
-const save = (k) => store.set(k, cfg[k]);
-const alertFor = (id) => cfg.alerts[id] ?? cfg.alertDefault;
-
-const state = {
-  view: location.hash === '#config' ? 'cfg' : 'main',
-  data: null, loading: false, error: null,
-  filter: store.get('filter', 'all'),
-  closedOpen: false, editing: null, dirty: false,
-  demo: new URLSearchParams(location.search).has('demo'),
-  cfgMsg: '',
-};
-
-// ---------- utilidades ----------
-const $app = document.getElementById('app');
+const VERSION = '1.0.16';
+const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const nf = (o) => new Intl.NumberFormat('pt-BR', o);
-const usd = (x) => (x == null ? '—' : 'US$ ' + nf({ minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(x));
-const usdShort = (x) => (x == null ? '—' : nf({ minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(x));
-const fmtP = (x) => (!isFinite(x) ? '—' : x >= 1000 ? nf({ maximumFractionDigits: 2 }).format(x) : nf({ maximumSignificantDigits: 6 }).format(x));
-const fmtE = (x) => (!isFinite(x) ? '—' : x >= 10000 ? nf({ maximumFractionDigits: 0 }).format(x) : nf({ maximumSignificantDigits: 5 }).format(x));
-const pct1 = (x) => nf({ maximumFractionDigits: 1 }).format(x) + '%';
-const short = (a) => a.slice(0, 6) + '…' + a.slice(-4);
-const walletName = (addr) => cfg.wallets.find((w) => w.addr.toLowerCase() === addr.toLowerCase())?.name || short(addr);
-
-const ICON = {
-  gear: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>',
-  refresh: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>',
-  back: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>',
-  trash: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>',
-  chev: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
+const ls = {
+  get: (k, d = null) => { try { const v = localStorage.getItem('rm.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set: (k, v) => { try { localStorage.setItem('rm.' + k, JSON.stringify(v)); } catch { /* sem armazenamento */ } },
+  del: (k) => { try { localStorage.removeItem('rm.' + k); } catch { /* */ } },
 };
-
-// ---------- moedas ----------
-const COIN = [
-  [/^(w?eth|steth|wsteth|cbeth|reth|weeth)$/i, 'Ξ', '#9FA6FF'],
-  [/^(usdc|usdc\.e|usdbc)$/i, '$', '#4C9BF0'],
-  [/^(usdt|usdt0|usd₮0)$/i, '₮', '#35C49A'],
-  [/^(dai|usds)$/i, '◈', '#F5C04A'],
-  [/btc/i, '₿', '#F7A23B'],
-  [/^(w?pol|w?matic)$/i, 'P', '#A58BFF'],
-  [/^arb$/i, 'A', '#5AA9F5'],
-];
-function coinStyle(sym) {
-  for (const [re, g, c] of COIN) if (re.test(sym)) return { g, c };
-  let h = 0; for (const ch of sym) h = (h * 31 + ch.codePointAt(0)) % 360;
-  return { g: (sym[0] || '?').toUpperCase(), c: `hsl(${h} 65% 68%)` };
+// idioma: o salvo, ou o do celular na primeira vez
+function applyLang(l) { setLang(l); setPriceLocale(loc()); }
+applyLang(ls.get('lang') || defaultLang());
+// tema: escuro, claro ou auto (segue o iPhone)
+function applyTheme(m) {
+  const light = m === 'light' || (m === 'auto' && matchMedia('(prefers-color-scheme: light)').matches);
+  document.documentElement.dataset.theme = light ? 'light' : 'dark';
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', light ? '#f3f5f6' : '#0b1216');
 }
-function checksum(addr) {
-  const a = addr.toLowerCase().replace(/^0x/, '');
-  const h = keccak256(new TextEncoder().encode(a));
-  let o = '0x';
-  for (let i = 0; i < 40; i++) o += parseInt(h[i], 16) >= 8 ? a[i].toUpperCase() : a[i];
-  return o;
-}
-const logoCache = {};
-function logoUrl(chain, t) {
-  const k = chain + t.addr;
-  if (logoCache[k]) return logoCache[k];
-  const root = 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/';
-  if (t.native) return (logoCache[k] = root + (t.symbol === 'ETH' ? 'ethereum' : chain) + '/info/logo.png');
-  return (logoCache[k] = `${root}${chain}/assets/${checksum(t.addr)}/logo.png`);
-}
-function coinHtml(p, t, side) {
-  const s = coinStyle(t.symbol);
-  return `<span class="coin ${side}" style="background:${s.c}" aria-hidden="true">${esc(s.g)}<img src="${logoUrl(p.chain, t)}" alt="" loading="lazy" onerror="this.remove()"></span>`;
-}
+applyTheme(ls.get('theme') || 'dark');
+matchMedia('(prefers-color-scheme: light)').addEventListener?.('change', () => applyTheme(ls.get('theme') || 'dark'));
+const S = { fin: ls.get('fin') || (() => { const f = { since: Date.now() - 86400e3, hidden: [] }; ls.set('fin', f); return f; })(), addr: ls.get('addr'), meta: ls.get('meta', {}), metaAt: ls.get('metaAt'), tab: 'pos', sort: ls.get('sort', { k: 'pnl', d: 1 }), open: new Set(), data: null, err: null, loading: false, at: 0, histDays: 30 };
 
-// ---------- status ----------
-const statusOf = (p) => (p.closed ? 'fechada' : p.status === 'fora' ? 'fora' : p.dist * 100 < alertFor(p.id) ? 'perto' : 'range');
-const ST = {
-  range: { label: 'No range', c: 'var(--ok)', t: 'var(--okT)' },
-  perto: { label: 'Perto da borda', c: 'var(--warn)', t: 'var(--warnT)' },
-  fora: { label: 'Fora do range', c: 'var(--bad)', t: 'var(--badT)' },
-};
-const ORDER = { fora: 0, perto: 1, range: 2 };
-
-// ---------- render ----------
-function header() {
-  const d = new Date();
-  const dia = d.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'short' }).replace('.', '').replace('-feira', '');
-  return `<header class="top">
-    <div><div class="when">${esc(dia.charAt(0).toUpperCase() + dia.slice(1))} · <span id="ago">${agoText()}</span></div>
-    <h1>Liquidez <small>v${VERSION}</small></h1></div>
-    <div class="btns">
-      <button class="icon-btn ${state.loading ? 'spin' : ''}" data-act="refresh" aria-label="Atualizar">${ICON.refresh}</button>
-      <button class="icon-btn" data-act="cfg" aria-label="Configurações">${ICON.gear}</button>
-    </div></header>`;
-}
-function agoText() {
-  if (state.loading && !state.data) return 'carregando…';
-  if (!state.data) return '—';
-  const s = Math.max(0, Math.round((Date.now() - state.data.updatedAt) / 1000));
-  return s < 60 ? `${s} s atrás` : `${Math.floor(s / 60)} min atrás`;
-}
-
-function ringCard(p) {
-  const st = ST[statusOf(p)];
-  const ang = ((135 + p.frac * 270) * Math.PI) / 180;
-  const dx = (66 + 54 * Math.cos(ang)).toFixed(1), dy = (66 + 54 * Math.sin(ang)).toFixed(1);
-  const cb = Math.round(p.compBase * 100), cq = 100 - cb;
-  const al = alertFor(p.id);
-  const out = p.status === 'fora';
-  const fill = out ? 0 : Math.min(1, (p.dist * 100) / 25) * 100;
-  const tick = Math.min(1, al / 25) * 100;
-  const multi = cfg.wallets.length > 1 && state.filter === 'all';
-  const fee = p.fee & 0x800000 ? 'taxa dinâmica' : nf({ maximumFractionDigits: 3 }).format(p.feePct) + '%';
-  const feeTxt = p.feesUsd != null ? `+ ${usdShort(p.feesUsd)} fees` : `+ ${Object.entries(p.fees).map(([k, v]) => fmtE(v) + ' ' + esc(k)).join(' · ')}`;
-  const editing = state.editing === p.id;
-  return `<article class="card">
-    <div class="row">
-      <div class="ring" role="img" aria-label="${esc(p.base.symbol)} ${cb}%, ${esc(p.quote.symbol)} ${cq}%; preço em ${Math.round(p.frac * 100)}% do range">
-        <svg width="132" height="132" viewBox="0 0 132 132" aria-hidden="true">
-          <circle cx="66" cy="66" r="54" fill="none" stroke="var(--track)" stroke-width="12" stroke-linecap="round" stroke-dasharray="254.47 400" transform="rotate(135 66 66)"/>
-          <circle cx="66" cy="66" r="54" fill="none" stroke="${st.c}" stroke-width="12" stroke-linecap="round" stroke-dasharray="${(p.frac * 254.47).toFixed(1)} 400" transform="rotate(135 66 66)" opacity="0.35"/>
-          <circle cx="${dx}" cy="${dy}" r="9" fill="#FFFFFF" stroke="${st.c}" stroke-width="4"/>
-        </svg>
-        ${coinHtml(p, p.base, 'l')}${coinHtml(p, p.quote, 'r')}
-        <div class="center"><b>${Math.round(p.frac * 100)}%</b><span>do range</span></div>
-        <div class="edge l ${cb >= cq ? 'dom' : ''}"><span class="sym">${esc(p.base.symbol)}</span><span class="pc">${cb}%</span><span class="px">${fmtE(p.pmin)}</span></div>
-        <div class="edge r ${cq > cb ? 'dom' : ''}"><span class="sym">${esc(p.quote.symbol)}</span><span class="pc">${cq}%</span><span class="px">${fmtE(p.pmax)}</span></div>
-      </div>
-      <div class="info">
-        <span class="pill" style="color:${st.c};background:${st.t}">${st.label}</span>
-        <a class="pair" href="${p.link}" target="_blank" rel="noopener">${esc(p.base.symbol)} / ${esc(p.quote.symbol)}</a>
-        <span class="meta">${fee} · ${p.chainName} · ${p.ver} · #${p.tokenId}${multi ? ' · ' + esc(walletName(p.owner)) : ''}</span>
-        <span class="val">${usd(p.valueUsd)}</span>
-        <span class="fee">${feeTxt}</span>
-        <span class="cur">atual ${fmtP(p.price)}</span>
-      </div>
-    </div>
-    ${editing ? `<div class="alert-edit"><span>Alerta perto da borda</span>
-      <span class="step"><button data-act="al-" data-id="${p.id}" aria-label="Diminuir">−</button><b>${al}%</b><button data-act="al+" data-id="${p.id}" aria-label="Aumentar">+</button></span>
-      <button class="ok" data-act="al-ok">OK</button></div>`
-    : `<button class="dist" data-act="edit" data-id="${p.id}" aria-label="Até a borda ${pct1(p.dist * 100)}; toque para ajustar o alerta (${al}%)">
-      <span class="lbl">${out ? 'Fora por' : 'Até a borda'}</span>
-      <span class="bar"><i style="width:${fill.toFixed(0)}%;background:${st.c}"></i><em style="left:${tick.toFixed(0)}%"></em></span>
-      <span class="v" ${out ? 'style="color:var(--bad)"' : ''}>${pct1(p.dist * 100)}</span></button>`}
-  </article>`;
-}
-
-function mainView() {
-  let h = header();
-  if (state.demo) h += `<div class="demo-banner"><span>Demonstração com dados fictícios</span><button data-act="demo-off">Sair</button></div>`;
-  if (!state.demo && !cfg.wallets.length) {
-    return h + `<div class="empty"><h2>Nenhuma carteira ainda</h2>
-      <p>Adicione o endereço de uma carteira para ver suas posições de liquidez na Uniswap v3 e v4.</p>
-      <button class="primary" data-act="cfg">Adicionar carteira</button>
-      <button class="secondary" data-act="demo-on">Ver demonstração</button></div>`;
-  }
-  if (state.error && !state.data) h += `<div class="notice warn">Não foi possível carregar: ${esc(state.error)}</div>`;
-  if (!state.data) return h + '<div class="skel"></div><div class="skel"></div>';
-
-  const d = state.data;
-  const mine = d.positions.filter((p) => state.filter === 'all' || p.owner.toLowerCase() === state.filter);
-  const open = mine.filter((p) => !p.closed).sort((a, b) => ORDER[statusOf(a)] - ORDER[statusOf(b)] || (b.valueUsd || 0) - (a.valueUsd || 0));
-  const closed = mine.filter((p) => p.closed);
-  const cnt = { range: 0, perto: 0, fora: 0 };
-  open.forEach((p) => cnt[statusOf(p)]++);
-  const total = open.reduce((s, p) => s + (p.valueUsd || 0), 0);
-  const fees = mine.reduce((s, p) => s + (p.feesUsd || 0), 0);
-
-  h += `<section class="summary"><div>
-      <div class="label">Total · ${open.length} ${open.length === 1 ? 'posição' : 'posições'}</div>
-      <div class="total num">${usd(total)}</div>
-      <div class="fees num">+ ${usdShort(fees)} fees</div></div>
-    <div class="counters">
-      <div class="counter"><b style="border-color:var(--ok)">${cnt.range}</b><span>range</span></div>
-      <div class="counter"><b style="border-color:var(--warn)">${cnt.perto}</b><span>perto</span></div>
-      <div class="counter"><b style="border-color:var(--bad)">${cnt.fora}</b><span>fora</span></div>
-    </div></section>`;
-
-  if (cfg.wallets.length > 1 && !state.demo) {
-    h += `<nav class="chips" aria-label="Carteiras"><button class="chip ${state.filter === 'all' ? 'on' : ''}" data-act="filter" data-v="all">Todas</button>` +
-      cfg.wallets.map((w) => `<button class="chip ${state.filter === w.addr.toLowerCase() ? 'on' : ''}" data-act="filter" data-v="${w.addr.toLowerCase()}">${esc(w.name)}</button>`).join('') + '</nav>';
-  }
-  if (d.needsGraphKey && !state.demo) h += `<div class="notice">Posições <b>v4</b> não aparecem sem a chave do The Graph. <a href="#config">Configurar</a></div>`;
-  if (d.errors?.length) h += `<div class="notice warn">${d.errors.map(esc).join('<br>')}</div>`;
-  if (state.error) h += `<div class="notice warn">Última atualização falhou: ${esc(state.error)}</div>`;
-  if (!open.length && !closed.length) h += `<div class="empty"><h2>Nenhuma posição encontrada</h2><p>Confira as carteiras e as redes nas configurações.</p></div>`;
-  h += open.map(ringCard).join('');
-  if (closed.length) {
-    const cf = closed.reduce((s, p) => s + (p.feesUsd || 0), 0);
-    h += `<section class="closed ${state.closedOpen ? 'open' : ''}">
-      <button data-act="closed" aria-expanded="${state.closedOpen}"><span>Fechadas (${closed.length})</span><span style="display:flex;align-items:center;gap:6px">${cf > 0.005 ? `<span class="num" style="font-weight:400;font-size:12px;color:var(--gain)">+ ${usdShort(cf)} a coletar</span>` : ''}${ICON.chev}</span></button>
-      ${state.closedOpen ? closed.map((p) => `<a class="item" href="${p.link}" target="_blank" rel="noopener"><span>${esc(p.base.symbol)} / ${esc(p.quote.symbol)} · ${p.chainName} · ${p.ver}</span><span>#${p.tokenId}</span></a>`).join('') : ''}
-    </section>`;
-  }
-  return h;
-}
-
-function cfgView() {
-  const w = cfg.wallets.map((x, i) => `<div class="w"><div><b>${esc(x.name)}</b><span>${short(x.addr)}</span></div><button class="del" data-act="wdel" data-i="${i}" aria-label="Remover ${esc(x.name)}">${ICON.trash}</button></div>`).join('');
-  return `<header class="top" style="align-items:center;justify-content:flex-start">
-      <button class="icon-btn" data-act="back" aria-label="Voltar">${ICON.back}</button>
-      <h1 style="font-size:24px">Configurações</h1></header>
-    <div class="cfg" style="display:flex;flex-direction:column;gap:24px">
-    <section><h2>Carteiras</h2>
-      ${w ? `<div class="group">${w}</div>` : ''}
-      <form id="wform" style="display:flex;flex-direction:column;gap:8px">
-        <div class="row2"><input class="field" name="name" placeholder="Apelido" aria-label="Apelido" style="width:110px;flex-shrink:0" autocomplete="off">
-        <input class="field" name="addr" placeholder="0x…" aria-label="Endereço da carteira" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
-        <div class="err" id="werr" role="alert"></div>
-        <button class="primary" type="submit">Adicionar</button>
-      </form></section>
-
-    <section><h2><label for="gkey">Chave The Graph</label></h2>
-      <input class="field" id="gkey" type="password" value="${esc(cfg.graphKey)}" placeholder="Cole sua chave" autocomplete="off" autocapitalize="off" spellcheck="false">
-      <span class="hint">Necessária para posições v4. Grátis em thegraph.com/studio. Salva só neste aparelho.</span></section>
-
-    <section><h2>Redes</h2><div class="nets">
-      ${Object.entries(CHAINS).map(([k, c]) => `<label><input type="checkbox" data-act="net" data-k="${k}" ${cfg.chains.includes(k) ? 'checked' : ''}>${c.name}</label>`).join('')}
-    </div></section>
-
-    <section><h2><label for="adef">Alerta perto da borda</label></h2>
-      <div class="row2" style="align-items:center"><input class="field" id="adef" type="number" min="1" max="50" step="1" inputmode="numeric" value="${cfg.alertDefault}" style="width:90px"><span class="hint">% de distância padrão. Ajuste por posição tocando em "Até a borda".</span></div></section>
-
-    <section><h2>Alertas no iPhone (GitHub)</h2>
-      <span class="hint">Copie estes valores para o repositório no GitHub, como indicado no README.</span>
-      <div class="row2" style="flex-wrap:wrap">
-        <button class="copy" data-act="copy-wallets">Copiar CARTEIRAS</button>
-        <button class="copy" data-act="copy-limits">Copiar LIMITES</button>
-      </div></section>
-
-    <details class="adv"><summary>RPC personalizado</summary><div class="rpc">
-      ${Object.entries(CHAINS).map(([k, c]) => `<input class="field" data-act="rpc" data-k="${k}" placeholder="${c.name}: ${c.rpc}" value="${esc(cfg.rpc[k] || '')}" aria-label="RPC ${c.name}" autocapitalize="off" spellcheck="false">`).join('')}
-      <span class="hint">Deixe vazio para usar o RPC público padrão.</span></div></details>
-
-    <p class="foot">Pools LP · v${VERSION}</p>
-    </div>`;
-}
-
-function render() {
-  $app.innerHTML = state.view === 'cfg' ? cfgView() : mainView();
-}
+// ---------- formatos ----------
+const br = (v, d = 2) => (v == null || !isFinite(v) ? '—' : Math.abs(v).toLocaleString(loc(), { minimumFractionDigits: d, maximumFractionDigits: d }));
+const sgn = (v) => (v > 0 ? '+' : v < 0 ? '−' : '');
+const usd = (v, sign = true) => (v == null || !isFinite(v) ? '—' : `${sign ? sgn(v) : v < 0 ? '−' : ''}$${br(v)}`);
+const num = (v) => (v == null || !isFinite(v) ? '—' : `${sgn(v)}${br(v)}`);
+const pct = (v, d = 1) => (v == null || !isFinite(v) ? '—' : `${sgn(v)}${Math.abs(v * 100).toLocaleString(loc(), { minimumFractionDigits: d, maximumFractionDigits: d })}%`);
+const cls = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
+const coin = (t) => t.symbol.replace(/^HL:/, '');
+const qty = (q) => q.toLocaleString(loc(), { maximumFractionDigits: q >= 100 ? 2 : q >= 1 ? 4 : 6 });
+const ago = (ts) => { const s = Math.round((Date.now() - ts) / 1000); return s < 60 ? tr('ago.s', { n: s }) : s < 3600 ? tr('ago.m', { n: Math.round(s / 60) }) : s < 86400 * 2 ? tr('ago.h', { n: Math.round(s / 3600) }) : tr('ago.d', { n: Math.round(s / 86400) }); };
+const dur = (ms) => { const m = Math.max(0, Math.round(ms / 60000)); if (m < 60) return `${m}min`; const h = Math.floor(m / 60); if (h < 24) return m % 60 ? `${h}h ${m % 60}min` : `${h}h`; return `${Math.floor(h / 24)}d ${h % 24}h`; };
+const dt = (ts) => { if (!ts) return '—'; const d = new Date(ts); const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; return lang() === 'en' ? `${month(d.getMonth())} ${d.getDate()} ${hm}` : `${d.getDate()} ${month(d.getMonth())} ${hm}`; };
+const SRC = (k) => (['visto', 'scanner', 'recon', 'plano', 'card', 'manual'].includes(k) ? tr('src.' + k) : null);
+const fmt1 = (v) => v.toLocaleString(loc(), { maximumFractionDigits: 1 });
+const sideTxt = (t) => tr(t.dir === 'baixa' ? 'short' : 'long');
 
 // ---------- dados ----------
-async function refresh() {
-  if (state.demo) { state.data = demoData(); render(); return; }
-  if (!cfg.wallets.length || state.loading) { render(); return; }
-  state.loading = true; render();
+async function load() {
+  if (!S.addr || S.loading) return;
+  S.loading = true; render();
   try {
-    state.data = await loadPositions({ wallets: cfg.wallets.map((w) => w.addr), chains: cfg.chains, graphKey: cfg.graphKey.trim(), rpcOverrides: cfg.rpc, alertFor });
-    state.error = null;
-  } catch (e) { state.error = e.message || String(e); }
-  state.loading = false;
-  if (state.view === 'main' && !state.editing) render();
+    const since = Date.now() - 90 * 86400e3;
+    const [market, state, orders, fills, fund, fees] = await Promise.all([
+      hlMarket(), hlState(S.addr), hlOpenOrders(S.addr), hlFills(S.addr, since), hlFunding(S.addr, since), hlFees(S.addr).catch(() => null),
+    ]);
+    const raw = { fills: fills.map(slimFill), funding: fund.filter((f) => f.delta?.usdc != null).map(slimFund), since };
+    const { trades } = buildTrades(raw, state, orders);
+    // guarda o TP/SL de cada posição aberta; quando ela fecha, o trade herda e diz se saiu no TP ou no stop
+    const memo = ls.get('memo', {});
+    const near = (a, b) => a && b && Math.abs(a - b) / b < 0.004;
+    for (const t of trades) {
+      if (t.status === 'open') { memo[t.id] = { tp: t.tp || null, sl: t.sl || null, tps: t.tps || [], lev: t.lev || null, margin: t.margin || null, ts: Date.now() }; continue; }
+      const m = memo[t.id]; if (!m) continue;
+      t.tp = m.tp; t.sl = m.sl; t.tps = m.tps || []; t.lev = m.lev || t.lev; t.margin = m.margin || t.margin;
+      const last = t.parts?.length ? t.parts[t.parts.length - 1].px : t.exit;
+      if (near(last, m.sl)) t.closeReason = 'stop'; else if (near(last, m.tp) || (m.tps || []).some((x) => near(last, x.px))) t.closeReason = 'alvo';
+    }
+    for (const k in memo) if (Date.now() - memo[k].ts > 120 * 86400e3) delete memo[k];
+    ls.set('memo', memo);
+    S.data = {
+      market, trades, orders: (orders || []).map(slimOrder), rate: fees ? +fees.userCrossRate : 0.00045,
+      account: { value: +state.marginSummary.accountValue, margin: +state.marginSummary.totalMarginUsed, free: +state.withdrawable },
+    };
+    S.err = null; S.at = Date.now();
+    // máxima e mínima desde a entrada (candles da Hyperliquid), em segundo plano
+    EXT.refresh(trades.filter((t) => t.status === 'open' && t.openedAt).map((t) => ({ id: t.id, coin: coin(t), since: t.openedAt })), () => { if (S.tab === 'pos') render(); });
+  } catch (e) {
+    S.err = e?.code === 'invalid' ? 'err.notfound' : 'err.net';
+  } finally { S.loading = false; render(); }
 }
+const EXT = extStore({ load: async () => ls.get('ext', {}), save: async (m) => ls.set('ext', m) });
+EXT.init();
+const withMeta = (t) => { const m = S.meta[t.id] || {}; return { ...t, patternName: m.patternName || null, tf: m.tf || null, linkSrc: m.patternName ? (m.auto ? m.src : m.src || 'manual') : null }; };
 
-// ---------- demonstração ----------
-function demoData() {
-  const T = {
-    wethA: { addr: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1', symbol: 'WETH', dec: 18 },
-    usdcA: { addr: '0xaf88d065e77c8cc2239327c5edb3a432268e5831', symbol: 'USDC', dec: 6 },
-    eth: { addr: '0x0000000000000000000000000000000000000000', symbol: 'ETH', dec: 18, native: true },
-    cbbtc: { addr: '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf', symbol: 'cbBTC', dec: 8 },
-    wethE: { addr: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2', symbol: 'WETH', dec: 18 },
-    usdt: { addr: '0xdac17f958d2ee523a2206206994597c13d831ec7', symbol: 'USDT', dec: 6 },
-    wbtcP: { addr: '0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6', symbol: 'WBTC', dec: 8 },
-    usdcP: { addr: '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359', symbol: 'USDC', dec: 6 },
+// ---------- barra TP/SL (igual à Carteira) ----------
+// largura real da barra: tela − margens da página (12+12) − recuo do card (12+12) − bordas (3+1)
+const W = () => Math.max(220, Math.min(560, (document.documentElement.clientWidth || window.innerWidth) - 56));
+function inTxt(v, frac) { if (v == null || !isFinite(v)) return ''; const t = num(v); return t.length * 6.2 + 8 <= frac * W() ? t : ''; }
+// seta no preço de agora, na cor do resultado (o valor fica no título do card)
+function arrow(pos, pl) {
+  if (pos == null) return '';
+  return `<i class="mk ${pl == null ? '' : pl >= 0 ? 'up' : 'dn'}" style="left:${(Math.max(0, Math.min(1, pos)) * 100).toFixed(1)}%"></i>`;
+}
+// trecho percorrido: forte = entrada → agora; claro com brilho = até o melhor e o pior ponto desde a entrada.
+// Os preenchimentos passam por baixo dos segmentos (o TP executado fica na cor cheia); por cima, só o contorno.
+function traveled(ent, pos, run) {
+  const box = (a, b, c) => { const x = Math.max(0, Math.min(a, b)), y = Math.min(1, Math.max(a, b)); return y - x < 0.002 ? '' : `<div class="${c}" style="left:${(x * 100).toFixed(2)}%;width:${((y - x) * 100).toFixed(2)}%"></div>`; };
+  let out = '';
+  if (pos != null) out += box(ent, pos, `trav ${pos >= ent ? 'up' : 'dn'}`);
+  // melhor e pior preço desde a entrada: linha pontilhada fina
+  const ln = (x, c) => `<i class="xl ${c}" style="left:${(Math.max(0, Math.min(1, x)) * 100).toFixed(2)}%"></i>`;
+  if (run?.fav != null && Math.abs(run.fav - ent) > 0.004) out += ln(run.fav, 'up');
+  if (run?.adv != null && Math.abs(run.adv - ent) > 0.004) out += ln(run.adv, 'dn');
+  return out;
+}
+function labels(t, sl, ent, right, sub) {
+  const cw = 6.4, w = W(), sT = fmtPrice(sl), eT = fmtPrice(t.entry);
+  const lo = (sT.length * cw + eT.length * cw / 2 + 10) / w, hi = 1 - (right.length * cw + (sub ? sub.length * 5.4 + 8 : 0) + eT.length * cw / 2 + 10) / w;
+  const x = lo <= hi ? Math.max(lo, Math.min(hi, ent)) : 0.5;
+  return `<div class="lb"><span class="sh">${sT}</span><span class="md" style="left:${(x * 100).toFixed(1)}%">${eT}</span><span class="lg">${right}${sub ? ` <small>· ${sub}</small>` : ''}</span></div>`;
+}
+function bar(t, p, pl, roe, L) {
+  const sl = t.sl, s = t.dir === 'baixa' ? -1 : 1;
+  if (sl == null || !L.levels.length) {
+    return `<div class="tpn"><span class="muted">${tr('entry')}</span> <b class="mono">${fmtPrice(t.entry)}</b> ${sl == null ? `<span class="nosl">${tr('noSl')}</span>` : `<span class="neg mono">SL ${fmtPrice(sl)}</span> <span class="muted">${tr('noTp')}</span>`}</div>`;
+  }
+  const w = W();
+  const RED = Math.max(0.22, Math.min(0.42, (fmtPrice(sl).length * 6.4 + 8) / w));
+  const segs = L.levels.map((x) => ({ w: x.pctOrig, px: x.px, done: x.done, win: x.win !== false, net: x.net }));
+  const unc = L.uncovered / (L.orig || 1);
+  if (unc > 0.005) segs.push({ w: unc, px: null, unc: true });
+  const tot = segs.reduce((a, x) => a + x.w, 0) || 1;
+  const posAt = (q) => {
+    const d = s * (q - t.entry);
+    if (d <= 0) return RED * (1 - Math.min(1, -d / Math.abs(t.entry - sl)));
+    let x = RED, prev = t.entry;
+    for (const g of segs) {
+      const gw = (1 - RED) * g.w / tot;
+      if (g.px == null) break;
+      const span = s * (g.px - prev), k = span > 0 ? (s * (q - prev)) / span : 1;
+      if (k >= 1) { x += gw; prev = g.px; continue; }
+      return Math.min(1, x + gw * Math.max(0, k));
+    }
+    return Math.min(x, 1);
   };
-  const prices = {
-    'arbitrum:0x82af49447d8a07e3bd95bd0d56f35241523fbab1': 3118.4, 'arbitrum:0xaf88d065e77c8cc2239327c5edb3a432268e5831': 1,
-    'coingecko:ethereum': 3118.4, 'base:0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf': 106992,
-    'ethereum:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 3118.4, 'ethereum:0xdac17f958d2ee523a2206206994597c13d831ec7': 1,
-    'polygon:0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6': 106992, 'polygon:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359': 1,
+  const pos = p ? posAt(p) : null;
+  const bw = bestWorst(EXT.get(t.id), t, p);
+  const trav = traveled(RED, pos, bw && { fav: bw.best != null ? posAt(bw.best) : null, adv: bw.worst != null ? posAt(bw.worst) : null });
+
+  const slV = L.ifSl != null ? L.ifSl - L.realized : null;
+  const html = segs.map((g) => `<div class="pg${g.done ? ' dn' : ''}${g.unc ? ' un' : ''}" style="flex:${(g.w / tot).toFixed(4)}"></div>`).join('');
+  // valores numa camada própria, por cima do brilho (sempre legíveis)
+  const txs = segs.map((g) => { const fr = (1 - RED) * g.w / tot; const tx = g.unc ? (fr * w > 44 ? tr('noTp') : '') : inTxt(g.net, fr - (g.done ? 0.04 : 0)); return `<span class="${g.done ? 't-dn' : g.unc ? 't-un' : 't-gn'}" style="flex:${(g.w / tot).toFixed(4)}">${g.done && tx ? '✓' : ''}${tx}</span>`; }).join('');
+  const nD = L.done.length, nA = L.levels.length, last = L.pend.length ? L.pend[L.pend.length - 1].px : L.levels[nA - 1].px;
+  return `<div class="tpb"><div class="trk">${trav}<div class="rk" style="width:${RED * 100}%"></div><div class="pgs">${html}</div><div class="txl"><span class="t-rk" style="width:${RED * 100}%">${inTxt(slV, RED)}</span><div class="txg">${txs}</div></div><i class="en" style="left:${RED * 100}%"></i>${arrow(pos, pl)}</div>
+    ${labels(t, sl, RED, fmtPrice(last), nA > 1 ? (nD ? tr('tpsOf', { d: nD, a: nA }) : tr('tps', { a: nA })) : '')}</div>`;
+}
+
+// ---------- telas ----------
+const updTxt = () => (S.loading ? `<span class="spin"></span> ${tr('upd.loading')}` : S.at ? `${tr('upd.at', { t: ago(S.at) })} ↻` : '↻');
+// o "atualizado há X s" conta segundo a segundo (sem redesenhar a tela)
+setInterval(() => { const el = $('#ref'); if (el && S.addr && !S.loading) el.innerHTML = updTxt(); }, 1000);
+function render() {
+  const app = $('#app');
+  if (!S.addr) { app.innerHTML = setupView(); bindSetup(); return; }
+  const body = S.tab === 'pos' ? posView() : S.tab === 'ord' ? ordView() : S.tab === 'hist' ? histView() : cfgView();
+  app.innerHTML = `<header><b>${S.tab === 'pos' ? 'Radar Mobile' : tr('tab.' + S.tab)}</b><button id="ref" class="upd">${updTxt()}</button></header>
+    ${S.err ? `<div class="err">${esc(tr(S.err))}</div>` : ''}
+    <main id="main">${body}</main>
+    <nav>${['pos', 'ord', 'hist', 'cfg'].map((k) => `<button data-tab="${k}" class="${S.tab === k ? 'on' : ''}">${tr('tab.' + k)}</button>`).join('')}</nav>`;
+  bind();
+}
+const langSeg = () => `<div class="lang">${[['pt', '🇧🇷 Português'], ['en', '🇺🇸 English']].map(([k, l]) => `<button type="button" data-lang="${k}" class="${lang() === k ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+function setupView() {
+  return `<div class="setup"><div class="brand"><span class="logo">◎</span><b>Radar Mobile</b></div>
+    ${langSeg()}
+    <p>${tr('setup.lead')}</p>
+    <label>${tr('setup.addr')}<input id="addr" placeholder="0x…" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="text"></label>
+    <small>${tr('setup.local')}</small>
+    <div class="err" id="aerr" hidden></div>
+    <button id="go" class="primary">${tr('setup.go')}</button>
+    <p class="muted">${tr('setup.opt')}</p>
+    <p class="ver">v${VERSION}</p></div>`;
+}
+function bindSetup() {
+  bindLang();
+  $('#go').onclick = () => {
+    const a = $('#addr').value.trim();
+    if (!isAddress(a)) { const e = $('#aerr'); e.hidden = false; e.textContent = tr('setup.bad'); return; }
+    S.addr = a; ls.set('addr', a); render(); load();
   };
-  const lg = (x) => Math.log(x) / Math.log(1.0001);
-  const mk = (o) => {
-    const sc = 10 ** (o.t0.dec - o.t1.dec);
-    const raw = { id: `${o.chain}-${o.ver}-${o.tokenId}`, chain: o.chain, ver: o.ver, tokenId: o.tokenId, owner: '0xdemo', t0: o.t0, t1: o.t1, fee: o.fee,
-      tl: Math.floor(lg(o.min / sc)), tu: Math.floor(lg(o.max / sc)), tick: Math.floor(lg(o.p / sc)),
-      sqrtP: BigInt(Math.round(Math.sqrt(o.p / sc) * 2 ** 96)), liq: 10n ** 12n, fees0: 0n, fees1: 0n };
-    const probe = derive(raw, prices, 5);
-    raw.liq = o.value ? BigInt(Math.round(1e12 * (o.value / (probe.valueUsd || 1)))) : 0n;
-    raw.fees1 = BigInt(Math.round((o.fees / (prices[`${o.chain}:${o.t1.addr}`] || 3118.4)) * 10 ** o.t1.dec));
-    return derive(raw, prices, alertFor(raw.id));
+}
+// troca de idioma (guarda no celular); o endereço já digitado não se perde
+function bindLang() {
+  document.querySelectorAll('[data-lang]').forEach((b) => (b.onclick = () => {
+    const typed = $('#addr')?.value;
+    applyLang(b.dataset.lang); ls.set('lang', lang()); render();
+    if (typed && $('#addr')) $('#addr').value = typed;
+  }));
+}
+
+// quanto do caminho até o SL o preço já andou.
+// SL do lado do prejuízo: da entrada até o SL. SL travando lucro: do melhor preço desde a entrada até o SL (folga devolvida).
+function slProg(t, p) {
+  if (!t.sl || !p) return null;
+  const s = t.dir === 'baixa' ? -1 : 1;
+  let ref = t.entry;
+  if (s * (t.sl - t.entry) >= 0) { const bw = bestWorst(EXT.get(t.id), t, p); ref = bw?.best != null && s * (bw.best - p) > 0 ? bw.best : p; }
+  return t.sl !== ref ? (p - ref) / (t.sl - ref) : null;
+}
+function posView() {
+  if (!S.data) return `<div class="empty">${tr(S.loading ? 'loadingPos' : 'noData')}</div>`;
+  const { market, account, rate } = S.data;
+  const open = S.data.trades.filter((t) => t.status === 'open').map(withMeta);
+  const rows = open.map((t) => {
+    const p = market[coin(t)]?.mark ?? null;
+    const L = ladder(t, rate);
+    const roe = t.margin ? t.upnl / t.margin : null;
+    const nx = L.pend[0] || null;
+    return { t, p, L, pl: t.upnl, roe, val: t.value || (p ? t.qty * p : 0), liqD: t.liq && p ? Math.abs(t.liq - p) / p : Infinity,
+      // quanto do caminho entrada → SL (ou → próximo TP) o preço já percorreu (0 = na entrada, 1 = chegou)
+      slP: slProg(t, p), slD: t.sl && p ? Math.abs(p - t.sl) / p : null, tpD: nx && p ? Math.abs(nx.px - p) / p : null, tpP: nx && p && nx.px !== t.entry ? (p - t.entry) / (nx.px - t.entry) : null, tpN: nx && L.levels.length > 1 ? nx.n : null };
+  });
+  let tPl = 0, tSl = 0, tTp = 0, nSl = 0, nTp = 0;
+  for (const r of rows) { tPl += r.pl || 0; if (r.L.ifSl != null) { tSl += r.L.ifSl - r.L.realized; nSl++; } if (r.L.pend.length) { tTp += r.L.pend.reduce((a, x) => a + x.net, 0); nTp++; } }
+  const k = S.sort.k, d = S.sort.d;
+  const key = { nsl: (r) => (r.slP == null ? Infinity : -r.slP), ntp: (r) => (r.tpP == null ? Infinity : -r.tpP), rr: (r) => (r.L.rr == null ? Infinity : r.L.rr === Infinity ? 1e9 : r.L.rr), pnl: (r) => r.pl || 0, mkt: (r) => coin(r.t), size: (r) => r.val, liq: (r) => r.liqD, margin: (r) => r.t.margin || 0, funding: (r) => r.t.funding || 0 }[k] || ((r) => r.pl || 0);
+  rows.sort((a, b) => { const x = key(a), y = key(b); if (x === Infinity || y === Infinity) return (x === Infinity) - (y === Infinity); return (typeof x === 'string' ? x.localeCompare(y) : x - y) * d; });
+  const chip = (kk, l) => `<button class="chip${k === kk ? ' on' : ''}" data-sort="${kk}">${l}${k === kk ? (d > 0 ? ' ▲' : ' ▼') : ''}</button>`;
+  return `<section class="tiles"><div class="tile"><span>${tr('tab.pos')}</span><b>${rows.length}</b></div><div class="tile"><span>${tr('acct')}</span><b>${usd(account.value, false)}</b></div><div class="tile"><span>${tr('openPnl')}</span><b class="${cls(tPl)}">${usd(tPl)}</b></div>
+    ${marginBar(account)}
+    <div class="tot">${nSl ? `${tr('allSl')} <b class="neg">${num(tSl)}</b>` : ''}${nSl && nTp ? ' · ' : ''}${nTp ? `${tr('allTp')} <b class="pos">${num(tTp)}</b>` : ''}</div></section>
+    <div class="sortw"><div class="sorts">${chip('nsl', tr('sort.nsl'))}${chip('ntp', tr('sort.ntp'))}${chip('rr', 'R/R')}${chip('pnl', 'PNL')}${['mkt', 'size', 'liq', 'margin', 'funding'].map((x) => chip(x, tr('sort.' + x))).join('')}</div></div>
+    ${rows.length ? rows.map(card).join('') : `<div class="empty">${tr('noPos')}</div>`}
+    ${finView()}`;
+}
+// margem usada (soma das posições) e o que sobra livre; a barra fica laranja acima de 70% da conta e vermelha acima de 90%
+function marginBar(a) {
+  if (!a?.value) return '';
+  const used = a.margin || 0, f = Math.max(0, Math.min(1, used / a.value)), free = Math.max(0, a.value - used);
+  const lvl = f > 0.9 ? 'hi' : f > 0.7 ? 'mid' : '';
+  // faixas como no mockup: verde até 70%, laranja de 70 a 90%, vermelho acima de 90%
+  const seg = (a0, a1, c) => (f > a0 ? `<div class="${c}" style="left:${a0 * 100}%;width:${(Math.min(f, a1) - a0) * 100}%"></div>` : '');
+  return `<div class="mg"><div class="mgt"><span>${tr('mg.used')} <b>${usd(used, false)}</b> <em class="${lvl}">${Math.round(f * 100)}%</em></span><span>${tr('mg.free')} <b>${usd(free, false)}</b></span></div>
+    <div class="mgb">${seg(0, 0.7, '')}${seg(0.7, 0.9, 'mid')}${seg(0.9, 1, 'hi')}<i style="left:70%"></i><i style="left:90%"></i></div>
+    ${f > 0.9 ? `<div class="mgw">⚠ ${tr('mg.full', { p: Math.round(f * 100) + '%' })}</div>` : ''}</div>`;
+}
+function card({ t, p, L, pl, roe, liqD, slP, tpP, tpN, slD, tpD }) {
+  const hk = S.sort.k;
+  const pc = (v) => (v > 1 ? '> 100' : String(Math.round(Math.max(0, v) * 100))) + '%';
+  // no lucro (0% do caminho) mostra também a distância do preço, para o desempate ficar visível
+  const dd = (v, d) => (v <= 0 && d != null ? ` <small>· ${tr('away', { p: fmt1(d * 100) + '%' })}</small>` : '');
+  const dist = `<div class="dst"><span class="${hk === 'nsl' ? 'neg on' : 'neg'}">${slP != null ? tr('distSl', { p: pc(slP) }) + dd(slP, slD) : tr('noSl')}</span><span class="${hk === 'ntp' ? 'pos on' : ''}">${tpP != null ? tr('distTp', { n: tpN ? 'TP' + tpN : 'TP', p: pc(tpP) }) + dd(tpP, tpD) : tr('noTp')}</span></div>`;
+  const rrv = L.rr == null ? '' : `<div class="dst rrl"><span></span><span class="${hk === 'rr' ? 'on' : ''}">R/R <b>${L.rr === Infinity ? tr('noRisk') : fmt1(L.rr)}</b></span></div>`;
+  const side = t.dir === 'baixa' ? 'sh' : 'lg', op = S.open.has(t.id);
+  const partial = t.parts?.length;
+  const liqTx = !t.liq ? '—' : liqD > 1 ? tr('far') : fmtPrice(t.liq);
+  const cell = (k, v, c = '') => `<div><span>${k}</span><b class="${c}">${v}</b></div>`;
+  return `<article class="pc ${side}${op ? ' open' : ''}" data-id="${esc(t.id)}">
+    <div class="h"><b class="coin">${esc(coin(t))}</b><span class="sd ${side}">${tr(t.dir === 'baixa' ? 'short' : 'long').toUpperCase()}</span>${t.lev ? `<span class="lev">${fmt1(t.lev)}x</span>` : ''}<span class="grow"></span>${pl != null && isFinite(pl) ? `<span class="now ${cls(pl)}"><b>${usd(pl)}</b><em>${roe != null && isFinite(roe) ? pct(roe) : ''}</em></span>` : ''}</div>
+    ${bar(t, p, pl, roe, L)}
+    ${dist}${rrv}
+    <div class="fg">${cell(tr('mark'), p ? fmtPrice(p) : '—', 'wht')}${cell(tr('liq'), liqTx, isFinite(liqD) && liqD < 0.1 ? 'warn' : '')}${cell(tr('margin'), t.margin ? usd(t.margin, false) : '—')}${cell(tr('size'), `${qty(t.qty)}${partial ? `<small>/${qty(origQty(t))}</small>` : ''}`)}</div>
+    ${op ? detail(t, p, L) : ''}</article>`;
+}
+// ---------- Finalizados: ficam até você dispensar ----------
+function finView() {
+  const list = finList(S.data.trades.filter((t) => t.status === 'closed').map(withMeta), S.fin);
+  if (!list.length) return '';
+  const tot = list.reduce((a, t) => a + (finResult(t) || 0), 0);
+  return `<div class="finh"><b>${tr('fin.title')}</b><span class="muted">${list.length}</span><span class="grow"></span><b class="${cls(tot)} mono">${usd(tot)}</b></div>
+    ${list.map(finCard).join('')}<button class="finall" data-fin="all">${tr('fin.all')}</button>`;
+}
+function finCard(t) {
+  const K = finKind(t), res = finResult(t), lab = { tp: K.label === 'TP' ? 'fin.tp' : 'fin.tpp', sl: 'fin.sl', man: 'fin.man', unk: 'fin.unk' }[K.k];
+  const side = t.dir === 'baixa' ? 'sh' : 'lg';
+  return `<article class="fc ${K.k}" data-id="${esc(t.id)}"><div class="fct"><span class="fsel ${K.k}">${tr(lab)}</span><span class="grow"></span><button class="fxb" data-fin-x="${esc(t.id)}" title="${tr('fin.x')}" aria-label="${tr('fin.x')}">×</button></div>
+    <div class="h ${side}"><b>${esc(coin(t))}</b><span>${t.lev ? fmt1(t.lev) + 'x · ' : ''}${sideTxt(t)}</span><span class="grow"></span><span class="now ${cls(res)}"><small>${tr('fin.final')}</small><b>${usd(res)}</b> <em>${t.margin && res != null ? pct(res / t.margin) : ''}</em></span></div>
+    ${finBar(t)}
+    <div class="f"><span>${tr('fin.closed', { t: ago(t.closedAt) })}</span><span>${t.openedAt ? tr('fin.lasted', { d: dur(t.closedAt - t.openedAt) }) : ''}</span><span>${qty(t.qty)} ${esc(coin(t))}</span></div></article>`;
+}
+// barra congelada no preço de saída (✓ lucro, ✕ perda)
+function finBar(t) {
+  const M = finModel(t);
+  if (!M.sl) return `<div class="tpn"><span class="muted">${tr('entry')}</span> <b class="mono">${fmtPrice(t.entry)}</b> → <span class="muted">${tr('fin.exit')}</span> <b class="mono">${fmtPrice(M.exitPx)}</b></div>`;
+  const w = W();
+  const RED = Math.max(0.22, Math.min(0.42, (fmtPrice(M.sl).length * 6.4 + 8) / w));
+  const posAt = finPosAt(t, M, RED), ex = posAt(M.exitPx);
+  const tot = M.segs.reduce((a, g) => a + g.w, 0) || 1;
+  const segs = M.segs.length ? M.segs.map((g) => `<div class="pg${g.done ? ' dn' : ''}" style="flex:${(g.w / tot).toFixed(4)}"></div>`).join('') : '<div class="pg" style="flex:1"></div>';
+  const txs = M.segs.map((g) => { const fr = (1 - RED) * g.w / tot; const tx = inTxt(g.net, fr - (g.done ? 0.04 : 0)); return `<span class="${g.done ? 't-dn' : 't-gn'}" style="flex:${(g.w / tot).toFixed(4)}">${g.done && tx ? '✓' : ''}${tx}</span>`; }).join('');
+  const hit = M.lossNet != null && M.lossNet < 0;
+  const redTx = hit ? (inTxt(M.lossNet, RED - 0.05) ? '✕ ' + inTxt(M.lossNet, RED - 0.05) : '') : inTxt(M.risk, RED);
+  const k = M.exitWin ? 'up' : 'dn', a = Math.min(RED, ex), wd = Math.abs(ex - RED);
+  const nA = M.nAll, sub = nA > 1 ? tr('tpsOf', { d: M.nDone, a: nA }) : finKind(t).k === 'tp' ? 'TP' : '';
+  return `<div class="tpb fz"><div class="trk"><div class="rk${hit ? ' hit' : ''}" style="width:${RED * 100}%"></div><div class="pgs">${segs}</div>
+    ${wd > 0.002 ? `<div class="trav ${k}" style="left:${(a * 100).toFixed(2)}%;width:${(wd * 100).toFixed(2)}%"></div>` : ''}
+    <div class="txl"><span class="t-rk" style="width:${RED * 100}%">${redTx}</span><div class="txg">${txs}</div></div>
+    <i class="en" style="left:${RED * 100}%"></i><i class="fxm ${k}" style="left:${(ex * 100).toFixed(1)}%"><b>${M.exitWin ? '✓' : '✕'}</b></i></div>
+    ${labels(t, M.sl, RED, M.lastPx != null ? fmtPrice(M.lastPx) : '—', sub)}</div>`;
+}
+function detail(t, p, L) {
+  const mg = t.margin;
+  const dist = (px) => (p ? tr('away', { p: fmt1(Math.abs(px - p) / p * 100) + '%' }) : '');
+  const row = (x) => `<tr class="${x.done ? 'dn' : ''}"><td class="${x.done && !x.win ? 'neg' : 'pos'}">${x.done ? '✓ ' : ''}TP${x.n}</td><td>${fmtPrice(x.px)}</td><td class="muted">${Math.round(x.pctOrig * 100)}%</td><td class="${cls(x.net)}">${num(x.net)}</td><td class="muted">${x.done ? dt(x.time) : dist(x.px)}</td></tr>`;
+  const slLeg = L.ifSl != null ? L.ifSl - L.realized : null;
+  const fee = (t.fees > 0 ? t.fees : t.qty * t.entry * S.data.rate) + t.qty * (p || t.entry) * S.data.rate;
+  return `<div class="det">
+    <div class="g2"><div class="box"><span>${tr('ifSl')}</span><b class="${cls(L.ifSl)}">${L.ifSl != null ? usd(L.ifSl) : tr('noSl')}</b><small>${L.ifSl != null && mg ? tr('onMargin', { p: pct(L.ifSl / mg) }) : ''}</small></div>
+    <div class="box"><span>${tr('ifAll')}</span><b class="${cls(L.ifAll)}">${L.ifAll != null ? usd(L.ifAll) : tr('noTp')}</b><small>${L.rrAvg != null ? tr('rr', { v: fmt1(L.rrAvg) }) : ''}</small></div></div>
+    ${L.realized ? `<div class="muted">${tr('realized')} <b class="${cls(L.realized)}">${usd(L.realized)}</b></div>` : ''}
+    ${L.lockHint ? `<div class="warn">${tr('lock', { l: usd(slLeg), a: usd(L.ifSl), e: fmtPrice(t.entry), v: usd(L.realized - t.entry * L.rest * S.data.rate) })}</div>` : ''}
+    <table>${L.levels.map(row).join('')}${t.sl != null ? `<tr><td class="neg">SL</td><td>${fmtPrice(t.sl)}</td><td class="muted">${tr(L.done.length ? 'rest' : 'all')}</td><td class="${cls(slLeg)}">${num(slLeg)}</td><td class="muted">${dist(t.sl)}</td></tr>` : ''}</table>
+    <div class="row muted"><span>${tr('entryAt', { p: fmtPrice(t.entry), d: t.openedAt ? dt(t.openedAt) : tr('before90') })}</span><span>${tr('fees', { f: usd(fee, false), g: usd(t.funding || 0) })}</span></div>
+    ${t.patternName ? `<div class="row"><span class="selo">${esc(patName(t.patternName))}${t.tf ? ' · ' + esc(t.tf) : ''}${SRC(t.linkSrc) ? ' · ' + SRC(t.linkSrc) : ''}</span>${S.metaAt ? `<small class="muted">${tr('fromBackup', { d: dt(S.metaAt) })}</small>` : ''}</div>` : ''}
+  </div>`;
+}
+function ordView() {
+  if (!S.data) return `<div class="empty">${tr('loading')}</div>`;
+  const o = [...S.data.orders].sort((a, b) => b.time - a.time);
+  if (!o.length) return `<div class="empty">${tr('noOrd')}</div>`;
+  const T = { 'Take Profit Market': tr('ot.tpm'), 'Take Profit Limit': tr('ot.tpl'), 'Stop Market': tr('ot.sm'), 'Stop Limit': tr('ot.sl'), Limit: tr('ot.l') };
+  return o.map((x) => `<article class="ord ${x.side === 'B' ? 'lg' : 'sh'}"><div class="h"><b>${esc(x.coin)}</b><span>${esc(T[x.type] || x.type)}</span><span class="grow"></span><span class="${x.side === 'B' ? 'pos' : 'neg'}">${tr(x.side === 'B' ? 'buy' : 'sell')}</span></div>
+    <div class="f"><span>${tr(x.trig ? 'trig' : 'price')} <b>${fmtPrice(x.trig || x.px)}</b></span><span>${tr('size')} <b>${x.sz ? qty(x.sz) : tr('wholePos')}</b></span><span class="muted">${dt(x.time)}</span></div></article>`).join('');
+}
+function histView() {
+  if (!S.data) return `<div class="empty">${tr('loading')}</div>`;
+  const lim = Date.now() - S.histDays * 86400e3;
+  const c = S.data.trades.filter((t) => t.status === 'closed' && t.closedAt >= lim).map(withMeta).sort((a, b) => b.closedAt - a.closedAt);
+  const tot = c.reduce((a, t) => a + (t.realized || 0), 0), wins = c.filter((t) => t.realized > 0).length;
+  return `<div class="sorts">${[7, 30, 90].map((d) => `<button class="chip${S.histDays === d ? ' on' : ''}" data-days="${d}">${tr('days', { d })}</button>`).join('')}</div>
+    <div class="tot">${c.length} trades · <b class="${cls(tot)}">${usd(tot)}</b>${c.length ? ` · ${tr('winrate', { p: Math.round(wins / c.length * 100) })}` : ''} · ${tr('net')}</div>
+    ${c.length ? c.map((t) => `<article class="ord ${t.dir === 'baixa' ? 'sh' : 'lg'}"><div class="h"><b>${esc(coin(t))}</b><span>${sideTxt(t)}${t.parts?.length > 1 ? ` · ${tr('exits', { n: t.parts.length })}` : ''}</span><span class="grow"></span><b class="${cls(t.realized)}">${usd(t.realized)}</b></div>
+    <div class="f"><span>${fmtPrice(t.entry)} → ${fmtPrice(t.exit)}</span><span class="muted">${dt(t.closedAt)}</span></div>${t.patternName ? `<div class="f"><span class="selo">${esc(patName(t.patternName))}${t.tf ? ' · ' + esc(t.tf) : ''}</span></div>` : ''}</article>`).join('') : `<div class="empty">${tr('noClosed')}</div>`}`;
+}
+function cfgView() {
+  const nMeta = Object.keys(S.meta || {}).length;
+  return `<section class="cfg">
+    <div class="box"><span>${tr('cfg.theme')}</span><div class="lang">${[['dark', '🌙 ' + tr('th.dark')], ['light', '☀️ ' + tr('th.light')], ['auto', '⚙️ Auto']].map(([k, l]) => `<button type="button" data-theme="${k}" class="${(ls.get('theme') || 'dark') === k ? 'on' : ''}">${l}</button>`).join('')}</div><small>${tr('cfg.themeSub')}</small></div>
+    <div class="box"><span>${tr('cfg.lang')}</span>${langSeg()}<small>${tr('cfg.langSub')}</small></div>
+    <div class="box"><span>${tr('cfg.wallet')}</span><b class="mono">${esc(S.addr.slice(0, 6))}…${esc(S.addr.slice(-4))}</b><small>${tr('cfg.walletSub')}</small><button id="out" class="ghost">${tr('cfg.change')}</button></div>
+    <div class="box"><span>${tr('cfg.linked')}</span><b>${nMeta ? (nMeta === 1 ? '1 trade' : tr('cfg.nTrades', { n: nMeta })) : tr('cfg.none')}</b><small>${S.metaAt ? tr('cfg.backupOf', { d: dt(S.metaAt) }) : tr('cfg.impHint')}</small>
+      <label class="ghost file">${tr('cfg.imp')}<input type="file" id="imp" accept="application/json,.json" hidden></label>${nMeta ? `<button id="clrm" class="ghost">${tr('cfg.clr')}</button>` : ''}</div>
+    <div class="box"><span>${tr('cfg.refresh')}</span><b>${tr('cfg.every')}</b><small>${tr('cfg.refreshSub')}</small></div>
+    <p class="ver">Radar Mobile v${VERSION}</p></section>`;
+}
+
+// ---------- eventos ----------
+function bind() {
+  $('#ref').onclick = () => load();
+  bindLang();
+  document.querySelectorAll('button[data-theme]').forEach((b) => (b.onclick = () => { ls.set('theme', b.dataset.theme); applyTheme(b.dataset.theme); render(); }));
+  document.querySelectorAll('nav [data-tab]').forEach((b) => (b.onclick = () => { S.tab = b.dataset.tab; render(); window.scrollTo(0, 0); }));
+  document.querySelectorAll('[data-sort]').forEach((b) => (b.onclick = () => {
+    const k = b.dataset.sort;
+    S.sort = S.sort.k === k ? { k, d: -S.sort.d } : { k, d: ['mkt', 'liq', 'nsl', 'ntp'].includes(k) ? 1 : -1 };
+    ls.set('sort', S.sort); render();
+  }));
+  document.querySelectorAll('[data-days]').forEach((b) => (b.onclick = () => { S.histDays = +b.dataset.days; render(); }));
+  document.querySelectorAll('[data-fin-x]').forEach((b) => (b.onclick = () => { S.fin = { ...S.fin, hidden: [...(S.fin.hidden || []), b.dataset.finX].slice(-500) }; ls.set('fin', S.fin); render(); }));
+  const fa = $('[data-fin=all]'); if (fa) fa.onclick = () => { S.fin = { since: Date.now(), hidden: [] }; ls.set('fin', S.fin); render(); };
+  document.querySelectorAll('article.pc').forEach((a) => (a.onclick = () => { const id = a.dataset.id; S.open.has(id) ? S.open.delete(id) : S.open.add(id); render(); }));
+  const out = $('#out'); if (out) out.onclick = () => { if (!confirm(tr('confirmOut'))) return; S.addr = null; S.data = null; ls.del('addr'); render(); };
+  const clr = $('#clrm'); if (clr) clr.onclick = () => { S.meta = {}; S.metaAt = null; ls.del('meta'); ls.del('metaAt'); render(); };
+  const imp = $('#imp');
+  if (imp) imp.onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try {
+      const data = JSON.parse(await f.text());
+      if (data.app !== 'radar-grafico' || !data.hlMeta) throw new Error('formato');
+      // só os vínculos (padrão, tf, origem); nada de endereço ou valores
+      const meta = {};
+      for (const [id, m] of Object.entries(data.hlMeta)) if (m?.patternName) meta[id] = { patternName: m.patternName, tf: m.tf || null, src: m.src || null, auto: !!m.auto };
+      S.meta = meta; S.metaAt = Date.parse(data.exportedAt) || Date.now();
+      ls.set('meta', meta); ls.set('metaAt', S.metaAt); render();
+    } catch { alert(tr('badFile')); }
   };
-  const positions = [
-    mk({ chain: 'arbitrum', ver: 'v3', tokenId: '812044', t0: T.wethA, t1: T.usdcA, fee: 500, p: 3118.4, min: 2850, max: 3450, value: 6420.15, fees: 38.92 }),
-    mk({ chain: 'base', ver: 'v4', tokenId: '10493', t0: T.eth, t1: T.cbbtc, fee: 3000, p: 1 / 34.31, min: 1 / 34.8, max: 1 / 30.1, value: 3105.77, fees: 21.4 }),
-    mk({ chain: 'ethereum', ver: 'v3', tokenId: '967310', t0: T.wethE, t1: T.usdt, fee: 3000, p: 3118.4, min: 3300, max: 3900, value: 2214.6, fees: 4.11 }),
-    mk({ chain: 'polygon', ver: 'v3', tokenId: '2231876', t0: T.wbtcP, t1: T.usdcP, fee: 500, p: 106992, min: 90000, max: 100000, value: 0, fees: 0 }),
-  ];
-  return { positions, errors: [], needsGraphKey: false, updatedAt: Date.now() - 12000 };
 }
+// puxar para baixo atualiza
+let y0 = null;
+window.addEventListener('touchstart', (e) => { y0 = window.scrollY <= 0 ? e.touches[0].clientY : null; }, { passive: true });
+window.addEventListener('touchend', (e) => { if (y0 != null && e.changedTouches[0].clientY - y0 > 80) load(); y0 = null; }, { passive: true });
+// atualiza a cada 15 s com a página visível
+setInterval(() => { if (document.visibilityState === 'visible' && S.addr) load(); else render(); }, 15000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.addr && Date.now() - S.at > 10000) load(); });
+window.addEventListener('resize', () => render());
+if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 
-// ---------- ações ----------
-async function copy(text) {
-  try { await navigator.clipboard.writeText(text); toast('Copiado'); }
-  catch { window.prompt('Copie o texto:', text); }
-}
-function toast(msg) {
-  const t = document.createElement('div');
-  t.textContent = msg;
-  t.style.cssText = 'position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 24px);transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;z-index:9';
-  document.body.appendChild(t); setTimeout(() => t.remove(), 1600);
-}
-function go(view) {
-  if (view === 'cfg') { if (location.hash !== '#config') location.hash = 'config'; }
-  else if (location.hash) history.back();
-}
-window.addEventListener('hashchange', () => {
-  const was = state.view;
-  state.view = location.hash === '#config' ? 'cfg' : 'main';
-  state.cfgMsg = '';
-  render();
-  if (was === 'cfg' && state.view === 'main' && state.dirty) { state.dirty = false; state.data = null; refresh(); }
-});
-
-$app.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-act]');
-  if (!el) return;
-  const act = el.dataset.act;
-  if (act === 'refresh') refresh();
-  else if (act === 'cfg') go('cfg');
-  else if (act === 'back') go('main');
-  else if (act === 'filter') { state.filter = el.dataset.v; store.set('filter', state.filter); render(); }
-  else if (act === 'closed') { state.closedOpen = !state.closedOpen; render(); }
-  else if (act === 'edit') { state.editing = el.dataset.id; render(); }
-  else if (act === 'al-' || act === 'al+') {
-    const id = el.dataset.id;
-    cfg.alerts[id] = Math.max(1, Math.min(50, alertFor(id) + (act === 'al+' ? 1 : -1)));
-    if (cfg.alerts[id] === cfg.alertDefault) delete cfg.alerts[id];
-    save('alerts'); render();
-  } else if (act === 'al-ok') { state.editing = null; render(); }
-  else if (act === 'demo-on') { state.demo = true; refresh(); }
-  else if (act === 'demo-off') { state.demo = false; state.data = null; history.replaceState(null, '', location.pathname); refresh(); }
-  else if (act === 'wdel') { cfg.wallets.splice(+el.dataset.i, 1); save('wallets'); state.dirty = true; render(); }
-  else if (act === 'copy-wallets') copy(cfg.wallets.map((w) => w.addr).join(','));
-  else if (act === 'copy-limits') copy(JSON.stringify(cfg.alerts));
-});
-$app.addEventListener('change', (e) => {
-  const el = e.target;
-  if (el.dataset.act === 'net') {
-    const k = el.dataset.k;
-    cfg.chains = el.checked ? [...new Set([...cfg.chains, k])] : cfg.chains.filter((x) => x !== k);
-    save('chains'); state.dirty = true;
-  } else if (el.dataset.act === 'rpc') {
-    const v = el.value.trim();
-    if (v) cfg.rpc[el.dataset.k] = v; else delete cfg.rpc[el.dataset.k];
-    save('rpc'); state.dirty = true;
-  } else if (el.id === 'gkey') { cfg.graphKey = el.value.trim(); save('graphKey'); state.dirty = true; }
-  else if (el.id === 'adef') { const v = Math.round(+el.value); if (v >= 1 && v <= 50) { cfg.alertDefault = v; save('alertDefault'); } }
-});
-$app.addEventListener('submit', (e) => {
-  if (e.target.id !== 'wform') return;
-  e.preventDefault();
-  const f = new FormData(e.target);
-  const addr = String(f.get('addr') || '').trim();
-  const name = String(f.get('name') || '').trim();
-  const err = (m) => { document.getElementById('werr').textContent = m; };
-  if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) return err('Endereço inválido: use 0x seguido de 40 caracteres.');
-  if (cfg.wallets.some((w) => w.addr.toLowerCase() === addr.toLowerCase())) return err('Essa carteira já está na lista.');
-  cfg.wallets.push({ name: name || `Carteira ${cfg.wallets.length + 1}`, addr });
-  save('wallets'); state.dirty = true; state.cfgMsg = ''; render();
-});
-
-// ---------- ciclo ----------
-setInterval(() => { const a = document.getElementById('ago'); if (a) a.textContent = agoText(); }, 1000);
-setInterval(() => { if (document.visibilityState === 'visible' && state.view === 'main' && !state.editing) refresh(); }, 60000);
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && state.data && Date.now() - state.data.updatedAt > 30000) refresh();
-});
 render();
-refresh();
+load();
