@@ -11,7 +11,7 @@ const topic = (env.NTFY_TOPIC || '').trim();
 const server = (env.NTFY_SERVER || 'https://ntfy.sh').replace(/\/$/, '');
 const graphKey = (env.GRAPH_API_KEY || '').trim();
 const def = Number(env.ALERTA_PADRAO) || 5;
-const chains = (env.REDES || 'ethereum,arbitrum,base,polygon').split(',').map((s) => s.trim()).filter(Boolean);
+const chains = (env.REDES || 'ethereum,arbitrum,base,polygon,monad').split(',').map((s) => s.trim()).filter(Boolean);
 const appUrl = env.APP_URL || '';
 let limits = {};
 try { limits = JSON.parse(env.LIMITES || '{}'); } catch { console.log('LIMITES inválido, usando o padrão.'); }

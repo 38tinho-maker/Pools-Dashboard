@@ -1,10 +1,11 @@
-# Pools LP · v1.0.1
+# Pools LP · v1.0.2
 
-Painel das suas posições de liquidez na **Uniswap v3 e v4** (Ethereum, Arbitrum, Base e Polygon), feito para abrir no iPhone. Os alertas chegam como notificação pelo app **ntfy**.
+Painel das suas posições de liquidez na **Uniswap v3 e v4** (Ethereum, Arbitrum, Base, Polygon e Monad), feito para abrir no iPhone. Os alertas chegam como notificação pelo app **ntfy**.
 
 - Cada posição aparece como um anel. A bolinha mostra onde está o preço dentro do range.
 - Nas pontas ficam as moedas: à esquerda, a moeda com que você fica 100% se o preço cair abaixo do mínimo; à direita, a moeda com que você fica 100% se subir acima do máximo.
-- Mostra também valor em US$, fees a coletar, distância até a borda e composição.
+- Mostra também valor em US$, fees a coletar e quanto elas representam do valor da posição (%), distância até a borda e composição.
+- **Monad:** por enquanto só posições v3. A v4 da Monad ainda não tem índice oficial no The Graph.
 - O limite de alerta é ajustável por posição: toque em **Até a borda**.
 - Atualiza a cada 1 minuto com o app aberto.
 - Carteiras e chave ficam salvas **só no seu aparelho**, nunca no código.

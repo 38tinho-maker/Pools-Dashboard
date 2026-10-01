@@ -2,7 +2,7 @@
 // Lê posições Uniswap v3 e v4 direto da blockchain (RPC público), usa The Graph
 // só para descobrir os IDs das posições v4 e DefiLlama para preços em US$.
 
-export const VERSION = '1.0.1';
+export const VERSION = '1.0.2';
 
 export const CHAINS = {
   ethereum: {
@@ -44,6 +44,16 @@ export const CHAINS = {
     v4sv: '0x5ea1bd7974c8a611cbab0bdcafcb1d9cc9b3ba5a',
     v4sub: 'CwpebM66AH5uqS5sreKij8yEkkPcHvmyEs7EwFtdM5ND',
     native: { symbol: 'POL', llama: 'coingecko:polygon-ecosystem-token' },
+  },
+  monad: {
+    name: 'Monad', slug: 'monad', llama: 'monad',
+    rpc: 'https://rpc.monad.xyz',
+    v3npm: '0x7197e214c0b767cfb76fb734ab638e2c192f4e53',
+    v3factory: '0x204faca1764b154221e35c0d20abb3c525710498',
+    v4pm: '0x5b7ec4a94ff9bedb700fb82ab09d5846972f4016',
+    v4sv: '0x77395f3b2e73ae90843717371294fa97cc419d64',
+    v4sub: null, // ainda sem índice oficial no The Graph: só v3
+    native: { symbol: 'MON', llama: 'coingecko:monad' },
   },
 };
 
@@ -310,6 +320,8 @@ export function derive(p, prices, alertPct) {
 
   const inQuote = amtBase * price + amtQuote;
   const compBase = inQuote > 0 ? (amtBase * price) / inQuote : price <= pmin ? 1 : 0;
+  const feeBase = invert ? fe1 : fe0, feeQuote = invert ? fe0 : fe1;
+  const feeYield = inQuote > 0 ? ((feeBase * price + feeQuote) / inQuote) * 100 : null;
 
   const closed = p.liq === 0n;
   const inRange = p.tick >= p.tl && p.tick < p.tu;
@@ -321,7 +333,7 @@ export function derive(p, prices, alertPct) {
   const frac = Math.max(0, Math.min(1, (price - pmin) / (pmax - pmin)));
 
   return { ...p, base, quote, price, pmin, pmax, frac, compBase, amtBase, amtQuote,
-    valueUsd, feesUsd, fees: { [p.t0.symbol]: fe0, [p.t1.symbol]: fe1 }, status, dist, side, alertPct, closed,
+    valueUsd, feesUsd, feeYield, fees: { [p.t0.symbol]: fe0, [p.t1.symbol]: fe1 }, status, dist, side, alertPct, closed,
     feePct: p.fee / 10000, chainName: chain.name,
     link: `https://app.uniswap.org/positions/${p.ver}/${chain.slug}/${p.tokenId}` };
 }
@@ -336,7 +348,7 @@ export async function loadPositions({ wallets, chains, graphKey, rpcOverrides = 
     const rpc = rpcOverrides[key] || chain.rpc;
     const meta = (metaByChain[key] = {});
     const jobs = [readV3(key, chain, rpc, owners, meta).catch((e) => { errors.push(`${chain.name} v3: ${e.message}`); return []; })];
-    if (graphKey) jobs.push(readV4(key, chain, rpc, owners, graphKey, meta).catch((e) => { errors.push(`${chain.name} v4: ${e.message}`); return []; }));
+    if (graphKey && chain.v4sub) jobs.push(readV4(key, chain, rpc, owners, graphKey, meta).catch((e) => { errors.push(`${chain.name} v4: ${e.message}`); return []; }));
     for (const r of await Promise.all(jobs)) all.push(...r);
   }));
   const prices = await usdPrices(all.flatMap((p) => [priceKey(CHAINS[p.chain], p.t0), priceKey(CHAINS[p.chain], p.t1)]));

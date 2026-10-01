@@ -1,4 +1,4 @@
-import { VERSION, CHAINS, loadPositions, derive, keccak256 } from './core.js?v=1.0.1';
+import { VERSION, CHAINS, loadPositions, derive, keccak256 } from './core.js?v=1.0.2';
 
 // ---------- armazenamento local (só neste aparelho) ----------
 const store = {
@@ -14,6 +14,13 @@ const cfg = {
   rpc: store.get('rpc', {}),
 };
 const save = (k) => store.set(k, cfg[k]);
+// redes novas em versões futuras entram marcadas automaticamente
+{
+  const known = store.get('knownChains', ['ethereum', 'arbitrum', 'base', 'polygon']);
+  const fresh = Object.keys(CHAINS).filter((k) => !known.includes(k));
+  if (fresh.length) { cfg.chains = [...new Set([...cfg.chains, ...fresh])]; save('chains'); }
+  store.set('knownChains', Object.keys(CHAINS));
+}
 const alertFor = (id) => cfg.alerts[id] ?? cfg.alertDefault;
 
 const state = {
@@ -54,6 +61,7 @@ const COIN = [
   [/btc/i, '₿', '#F7A23B'],
   [/^(w?pol|w?matic)$/i, 'P', '#A58BFF'],
   [/^arb$/i, 'A', '#5AA9F5'],
+  [/^w?mon$/i, 'M', '#9B8CFF'],
 ];
 function coinStyle(sym) {
   for (const [re, g, c] of COIN) if (re.test(sym)) return { g, c };
@@ -119,7 +127,8 @@ function ringCard(p) {
   const tick = Math.min(1, al / 25) * 100;
   const multi = cfg.wallets.length > 1 && state.filter === 'all';
   const fee = p.fee & 0x800000 ? 'taxa dinâmica' : nf({ maximumFractionDigits: 3 }).format(p.feePct) + '%';
-  const feeTxt = p.feesUsd != null ? `+ ${usdShort(p.feesUsd)} fees` : `+ ${Object.entries(p.fees).map(([k, v]) => fmtE(v) + ' ' + esc(k)).join(' · ')}`;
+  const yieldTxt = p.feeYield != null && isFinite(p.feeYield) ? ` · ${nf({ minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(p.feeYield)}%` : '';
+  const feeTxt = (p.feesUsd != null ? `+ ${usdShort(p.feesUsd)} fees` : `+ ${Object.entries(p.fees).map(([k, v]) => fmtE(v) + ' ' + esc(k)).join(' · ')}`) + yieldTxt;
   const editing = state.editing === p.id;
   return `<article class="card">
     <div class="row">
