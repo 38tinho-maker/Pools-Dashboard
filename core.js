@@ -2,7 +2,7 @@
 // Lê posições Uniswap v3 e v4 direto da blockchain (RPC público), usa The Graph
 // só para descobrir os IDs das posições v4 e DefiLlama para preços em US$.
 
-export const VERSION = '1.1.0';
+export const VERSION = '1.2.0';
 
 export const CHAINS = {
   ethereum: {

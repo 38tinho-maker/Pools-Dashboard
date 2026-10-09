@@ -155,3 +155,21 @@ details.adv .rpc { display: flex; flex-direction: column; gap: 6px; margin-top: 
 .foot { text-align: center; font-size: 12px; color: var(--muted); }
 .demo-banner { border-radius: 14px; background: var(--okT); color: var(--ok); padding: 10px 14px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .demo-banner button { border: 0; background: none; color: inherit; font-weight: 600; font-size: 13px; min-height: 36px; }
+
+/* v1.2 — alertas */
+.ae-title { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.alert-edit .ae, .group.pad .ae { min-height: 48px; border-bottom: 1px solid var(--line); }
+.alert-edit .ae.end, .group.pad .ae:last-child { border-bottom: 0; }
+.alert-edit { gap: 0; }
+.ae small { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
+.group.pad { padding: 0 14px; }
+.unit { font-size: 13px; color: var(--muted); }
+.field.xs { width: 60px; height: 36px; font-size: 15px; font-family: 'Geist Mono', monospace; padding: 0 8px; }
+.field[type=time] { width: 92px; }
+.sw { width: 51px; height: 31px; border-radius: 16px; border: 0; padding: 0; background: var(--card2); position: relative; flex-shrink: 0; transition: background .15s; }
+.sw span { position: absolute; left: 2px; top: 2px; width: 27px; height: 27px; border-radius: 14px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: left .15s; }
+.sw.on { background: var(--gain); }
+.sw.on span { left: 22px; }
+.group.pad .ae { flex-wrap: nowrap; }
+.group.pad .ae > span:first-child, .alert-edit .ae > span:first-child { flex: 1; min-width: 0; }
+.field[type=time] { width: 112px; }

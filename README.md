@@ -1,4 +1,4 @@
-# Pools LP · v1.1.0
+# Pools LP · v1.2.0
 
 Painel das suas posições de liquidez na **Uniswap v3 e v4** (Ethereum, Arbitrum, Base, Polygon e Monad), feito para abrir no iPhone. Os alertas chegam como notificação pelo app **ntfy**.
 
@@ -39,14 +39,22 @@ Para ver sem configurar nada, abra o site com `?demo` no fim do endereço.
 
 ## 3. Alertas no iPhone (ntfy + GitHub Actions)
 
-O GitHub verifica suas posições a cada ~10 minutos e avisa **só quando algo muda**:
+O GitHub verifica suas posições a cada ~10 minutos. Cada alerta avisa **uma vez**, quando a condição passa a valer:
 
-- **saiu do range** e **entrou no range**;
-- **perto da borda**: o % que você ajusta em cada cartão;
-- **preço alvo** cruzado (acima ou abaixo de um valor seu);
-- **fees a coletar** atingiram X% do valor da posição.
-
-Os alertas de cada posição se ajustam no próprio cartão: toque em **Até a borda**. Tudo é enviado sozinho para o GitHub.
+- **por posição** (toque em "Até a borda" no cartão), com padrão nas Configurações:
+  - entrou / saiu do range (liga e desliga);
+  - perto da borda;
+  - preço alvo;
+  - fees atingiram X%;
+  - fees atingiram US$ X;
+  - composição (moeda ≥ X%);
+  - fora do range há mais de X horas;
+- **gerais:**
+  - posição nova ou fechada;
+  - pool parou de render: no range, mas as fees de 24h ficam abaixo de 30% da média de 7 dias (precisa de ~2 dias de histórico);
+- **quando avisar:**
+  - lembrete repetido enquanto a posição estiver fora;
+  - horário de silêncio: só "saiu do range" toca, e o resto chega num resumo no fim do horário.
 
 ### Configuração (uma vez só)
 

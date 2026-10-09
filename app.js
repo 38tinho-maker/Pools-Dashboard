@@ -1,4 +1,4 @@
-import { VERSION, CHAINS, loadPositions, derive, keccak256 } from './core.js?v=1.1.0';
+import { VERSION, CHAINS, loadPositions, derive, keccak256 } from './core.js?v=1.2.0';
 
 // ---------- armazenamento local (só neste aparelho) ----------
 const store = {
@@ -29,17 +29,31 @@ const save = (k) => store.set(k, cfg[k]);
   if (fresh.length) { cfg.chains = [...new Set([...cfg.chains, ...fresh])]; save('chains'); }
   store.set('knownChains', Object.keys(CHAINS));
 }
-// alerta por posição: { borda: %, alvo: { dir: 'abaixo'|'acima', preco }, fee: % }
+// padrões de alerta (valem para todas as posições) e opções gerais
+cfg.def = store.get('def', { range: true, borda: cfg.alertDefault ?? 5, fee: cfg.feeDefault || 0, feeUsd: 0, comp: 0, fora: 0 });
+cfg.glob = store.get('glob', { novas: true, render: true, lembrete: 0, silencio: { on: false, de: '23:00', ate: '07:00' } });
+// alerta por posição: { range:false?, borda, alvo:{dir,preco}, fee, feeUsd, comp:{side,pct}, fora }
 const alOf = (id) => { const a = cfg.alerts[id]; return typeof a === 'number' ? { borda: a } : { ...(a || {}) }; };
-const alertFor = (id) => alOf(id).borda ?? cfg.alertDefault;
-const feeFor = (id) => alOf(id).fee ?? (cfg.feeDefault || null);
+function eff(id) {
+  const a = alOf(id), d = cfg.def;
+  return {
+    range: a.range ?? d.range, borda: a.borda ?? d.borda, alvo: a.alvo || null,
+    fee: a.fee ?? (d.fee || null), feeUsd: a.feeUsd ?? (d.feeUsd || null),
+    comp: a.comp ?? (d.comp ? { side: 'any', pct: d.comp } : null), fora: a.fora ?? (d.fora || null),
+  };
+}
+const alertFor = (id) => eff(id).borda || 0;
 function setAl(id, patch) {
-  const a = { ...alOf(id), ...patch };
+  const a = { ...alOf(id), ...patch }, d = cfg.def;
   for (const k of Object.keys(a)) if (a[k] == null) delete a[k];
-  if (a.borda === cfg.alertDefault) delete a.borda;
+  if (a.range === d.range) delete a.range;
+  if (a.borda === d.borda) delete a.borda;
+  for (const k of ['fee', 'feeUsd', 'fora']) if (a[k] != null && a[k] === (d[k] || null)) delete a[k];
   if (Object.keys(a).length) cfg.alerts[id] = a; else delete cfg.alerts[id];
   save('alerts'); scheduleSync();
 }
+const saveDef = () => { save('def'); scheduleSync(); };
+const saveGlob = () => { save('glob'); scheduleSync(); };
 
 const state = {
   view: location.hash === '#config' ? 'cfg' : 'main',
@@ -63,7 +77,7 @@ const fmtE = (x) => (!isFinite(x) ? '—' : x > 0 && x < 1e-6 ? tiny(x) : x >= 1
 const tiny = (x) => x.toExponential(2).replace('.', ',');
 const pct1 = (x) => (!isFinite(x) ? '—' : x > 999 ? '>999%' : nf({ maximumFractionDigits: 1 }).format(x) + '%');
 const pct2 = (x) => (!isFinite(x) ? '—' : x > 999 ? '>999%' : nf({ minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(x) + '%');
-const parseNum = (v) => { let s = String(v || '').trim().replace(/\s/g, ''); if (!s) return null; if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.'); const n = parseFloat(s); return isFinite(n) && n > 0 ? n : null; };
+const parseNum = (v) => { let s = String(v || '').trim().replace(/\s/g, ''); if (!s) return null; if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.'); else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, ''); const n = parseFloat(s); return isFinite(n) && n > 0 ? n : null; };
 const short = (a) => a.slice(0, 6) + '…' + a.slice(-4);
 const walletName = (addr) => cfg.wallets.find((w) => w.addr.toLowerCase() === addr.toLowerCase())?.name || short(addr);
 
@@ -114,6 +128,8 @@ function coinHtml(p, t, side) {
 
 // ---------- status ----------
 const statusOf = (p) => (p.closed ? 'fechada' : p.status === 'fora' ? 'fora' : p.dist * 100 < alertFor(p.id) ? 'perto' : 'range');
+const num2 = (x) => (x == null ? '' : nf({ maximumFractionDigits: 2 }).format(x));
+const sw = (on, attrs) => `<button class="sw ${on ? 'on' : ''}" role="switch" aria-checked="${on}" ${attrs}><span></span></button>`;
 const ST = {
   range: { label: 'No range', c: 'var(--ok)', t: 'var(--okT)' },
   perto: { label: 'Perto da borda', c: 'var(--warn)', t: 'var(--warnT)' },
@@ -165,8 +181,19 @@ function ringCard(p) {
   const multi = cfg.wallets.length > 1 && state.filter === 'all';
   const fee = p.fee & 0x800000 ? 'taxa dinâmica' : nf({ maximumFractionDigits: 3 }).format(p.feePct) + '%';
   const yieldTxt = p.feeYield != null && isFinite(p.feeYield) ? ` · ${pct2(p.feeYield)}` : '';
-  const A = alOf(p.id), fAlvo = feeFor(p.id);
-  const extra = [A.alvo ? `preço ${A.alvo.dir === 'acima' ? '>' : '<'} ${fmtP(A.alvo.preco)}` : '', fAlvo ? `fee ≥ ${pct1(fAlvo)}` : ''].filter(Boolean).join(' · ');
+  const A = alOf(p.id), E = eff(p.id);
+  const compSym = (c) => (c.side === 'base' ? p.base.symbol : c.side === 'quote' ? p.quote.symbol : 'moeda');
+  const extra = [
+    E.range ? '' : 'range desligado',
+    E.borda ? `borda ${E.borda}%` : '',
+    E.alvo ? `preço ${E.alvo.dir === 'acima' ? '>' : '<'} ${fmtP(E.alvo.preco)}` : '',
+    E.fee ? `fee ≥ ${pct1(E.fee)}` : '',
+    E.feeUsd ? `fee ≥ US$ ${num2(E.feeUsd)}` : '',
+    E.comp ? `${esc(compSym(E.comp))} ≥ ${E.comp.pct}%` : '',
+    E.fora ? `fora > ${num2(E.fora)} h` : '',
+  ].filter(Boolean).join(' · ');
+  const showExtra = Object.keys(A).length > 0;
+  const cs = A.comp?.side || 'base';
   const feeTxt = (p.feesUsd != null ? `+ ${usdShort(p.feesUsd)} fees` : `+ ${Object.entries(p.fees).map(([k, v]) => fmtE(v) + ' ' + esc(k)).join(' · ')}`) + yieldTxt;
   const editing = state.editing === p.id;
   return `<article class="card">
@@ -191,22 +218,26 @@ function ringCard(p) {
         <span class="cur">atual ${fmtP(p.price)}</span>
       </div>
     </div>
-    ${editing ? `<div class="alert-edit">
+    ${editing ? `<div class="alert-edit" data-id="${p.id}">
+      <span class="ae-title">Alertas desta posição</span>
+      <div class="ae"><span>Entrou / saiu do range</span>${sw(E.range, 'data-act="tg" data-f="range"')}</div>
       <div class="ae"><span>Perto da borda</span>
-        <span class="step"><button data-act="al-" data-id="${p.id}" aria-label="Diminuir">−</button><b>${al}%</b><button data-act="al+" data-id="${p.id}" aria-label="Aumentar">+</button></span></div>
+        <span class="step"><button data-act="st" data-d="-1" aria-label="Diminuir">−</button><b data-f="borda" data-v="${E.borda || 0}">${E.borda ? E.borda + '%' : 'desl.'}</b><button data-act="st" data-d="1" aria-label="Aumentar">+</button></span></div>
       <div class="ae"><span>Preço alvo <small>${esc(p.base.symbol)} em ${esc(p.quote.symbol)}</small></span>
-        <span class="ae-in"><span class="seg" role="group" aria-label="Direção">
-          <button data-act="al-dir" data-id="${p.id}" data-v="abaixo" class="${(A.alvo?.dir || 'abaixo') === 'abaixo' ? 'on' : ''}">abaixo</button>
-          <button data-act="al-dir" data-id="${p.id}" data-v="acima" class="${A.alvo?.dir === 'acima' ? 'on' : ''}">acima</button></span>
-        <input class="field sm" data-act="al-price" data-id="${p.id}" inputmode="decimal" placeholder="${fmtP(p.price)}" value="${A.alvo ? fmtP(A.alvo.preco) : ''}" aria-label="Preço alvo"></span></div>
-      <div class="ae"><span>Fee % atingida</span>
-        <span class="ae-in"><input class="field sm" data-act="al-fee" data-id="${p.id}" inputmode="decimal" placeholder="${cfg.feeDefault ? nf({ maximumFractionDigits: 2 }).format(cfg.feeDefault) : 'desligado'}" value="${A.fee != null ? nf({ maximumFractionDigits: 2 }).format(A.fee) : ''}" aria-label="Fee % para avisar"><span>%</span></span></div>
-      <div class="ae end"><span class="hint">Deixe vazio para desligar.</span><button class="ok" data-act="al-ok">OK</button></div></div>`
+        <span class="ae-in"><span class="seg" data-f="dir"><button data-act="seg" data-v="abaixo" class="${(A.alvo?.dir || 'abaixo') === 'abaixo' ? 'on' : ''}">abaixo</button><button data-act="seg" data-v="acima" class="${A.alvo?.dir === 'acima' ? 'on' : ''}">acima</button></span>
+        <input class="field sm" data-f="preco" inputmode="decimal" placeholder="${fmtP(p.price)}" value="${A.alvo ? fmtP(A.alvo.preco) : ''}" aria-label="Preço alvo"></span></div>
+      <div class="ae"><span>Fees atingiram</span><span class="ae-in"><input class="field sm" data-f="fee" inputmode="decimal" placeholder="${cfg.def.fee ? num2(cfg.def.fee) : '—'}" value="${num2(A.fee)}" aria-label="Fees em % para avisar"><span class="unit">%</span></span></div>
+      <div class="ae"><span>Fees atingiram</span><span class="ae-in"><input class="field sm" data-f="feeUsd" inputmode="decimal" placeholder="${cfg.def.feeUsd ? num2(cfg.def.feeUsd) : '—'}" value="${num2(A.feeUsd)}" aria-label="Fees em US$ para avisar"><span class="unit">US$</span></span></div>
+      <div class="ae"><span>Composição</span>
+        <span class="ae-in"><span class="seg" data-f="side"><button data-act="seg" data-v="base" class="${cs === 'base' ? 'on' : ''}">${esc(p.base.symbol)}</button><button data-act="seg" data-v="quote" class="${cs === 'quote' ? 'on' : ''}">${esc(p.quote.symbol)}</button></span><span class="unit">≥</span>
+        <input class="field xs" data-f="comp" inputmode="numeric" placeholder="${cfg.def.comp || '—'}" value="${A.comp ? A.comp.pct : ''}" aria-label="Composição mínima em %"><span class="unit">%</span></span></div>
+      <div class="ae"><span>Fora do range há mais de</span><span class="ae-in"><input class="field sm" data-f="fora" inputmode="decimal" placeholder="${cfg.def.fora ? num2(cfg.def.fora) : '—'}" value="${num2(A.fora)}" aria-label="Horas fora do range"><span class="unit">h</span></span></div>
+      <div class="ae end"><span class="hint">Vazio = usa o padrão das configurações.</span><button class="ok" data-act="al-ok">OK</button></div></div>`
     : `<button class="dist" data-act="edit" data-id="${p.id}" aria-label="Até a borda ${pct1(p.dist * 100)}; toque para ajustar os alertas">
       <span class="lbl">${out ? 'Fora por' : 'Até a borda'}</span>
       <span class="bar"><i style="width:${fill.toFixed(0)}%;background:${st.c}"></i><em style="left:${tick.toFixed(0)}%"></em></span>
       <span class="v" ${out ? 'style="color:var(--bad)"' : ''}>${pct1(p.dist * 100)}</span></button>
-      ${extra ? `<div class="alerts-on">Alertas: ${extra}</div>` : ''}`}
+      ${showExtra && extra ? `<div class="alerts-on">Alertas: ${extra}</div>` : ''}`}
   </article>`;
 }
 
@@ -297,9 +328,34 @@ function cfgView() {
       <label class="lbl2" for="ghrepo">Repositório</label>
       <input class="field" id="ghrepo" value="${esc(cfg.gh.repo)}" placeholder="usuario/repositorio" autocomplete="off" autocapitalize="off" spellcheck="false">
       <span class="hint" id="syncst">${syncText()}</span>
-      <div class="row2" style="align-items:center;margin-top:6px"><input class="field" id="adef" type="number" min="1" max="50" step="1" inputmode="numeric" value="${cfg.alertDefault}" style="width:80px"><span class="hint">% padrão para "perto da borda"</span></div>
-      <div class="row2" style="align-items:center"><input class="field" id="fdef" inputmode="decimal" value="${cfg.feeDefault ? nf({ maximumFractionDigits: 2 }).format(cfg.feeDefault) : ''}" placeholder="—" style="width:80px"><span class="hint">% padrão de fee para avisar (vazio = desligado)</span></div>
-      <span class="hint">Cada posição pode ter seus próprios alertas: toque em "Até a borda" no cartão. Tudo é enviado sozinho para o GitHub, que verifica a cada ~10 min.</span>
+    </section>
+
+    <section><h2>Alertas — padrão de todas as posições</h2>
+      <div class="group pad">
+        <div class="ae"><span>Entrou / saiu do range</span>${sw(cfg.def.range, 'data-act="dtg" data-f="range"')}</div>
+        <div class="ae"><span>Perto da borda</span><span class="ae-in"><input class="field xs" data-def="borda" inputmode="numeric" value="${cfg.def.borda || ''}" placeholder="—"><span class="unit">%</span></span></div>
+        <div class="ae"><span>Fees atingiram</span><span class="ae-in"><input class="field xs" data-def="fee" inputmode="decimal" value="${num2(cfg.def.fee || null)}" placeholder="—"><span class="unit">%</span></span></div>
+        <div class="ae"><span>Fees atingiram</span><span class="ae-in"><input class="field xs" data-def="feeUsd" inputmode="decimal" value="${num2(cfg.def.feeUsd || null)}" placeholder="—"><span class="unit">US$</span></span></div>
+        <div class="ae"><span>Composição numa moeda ≥</span><span class="ae-in"><input class="field xs" data-def="comp" inputmode="numeric" value="${cfg.def.comp || ''}" placeholder="—"><span class="unit">%</span></span></div>
+        <div class="ae"><span>Fora do range há mais de</span><span class="ae-in"><input class="field xs" data-def="fora" inputmode="decimal" value="${num2(cfg.def.fora || null)}" placeholder="—"><span class="unit">h</span></span></div>
+      </div>
+      <span class="hint">Vazio = desligado. Cada posição pode mudar esses valores no próprio cartão.</span>
+    </section>
+
+    <section><h2>Carteira e pools</h2>
+      <div class="group pad">
+        <div class="ae"><span>Posição nova ou fechada<small>Avisa quando algo muda na carteira</small></span>${sw(cfg.glob.novas, 'data-act="gtg" data-f="novas"')}</div>
+        <div class="ae"><span>Pool parou de render<small>No range, mas fees de 24h abaixo de 30% da média dos 7 dias</small></span>${sw(cfg.glob.render, 'data-act="gtg" data-f="render"')}</div>
+      </div>
+    </section>
+
+    <section><h2>Quando avisar</h2>
+      <div class="group pad">
+        <div class="ae"><span>Lembrete enquanto fora<small>Repete o aviso de saída do range</small></span><span class="ae-in"><span class="unit">a cada</span><input class="field xs" id="glemb" inputmode="decimal" value="${num2(cfg.glob.lembrete || null)}" placeholder="—"><span class="unit">h</span></span></div>
+        <div class="ae"><span>Horário de silêncio<small>Só "saiu do range" toca nesse horário</small></span>${sw(cfg.glob.silencio.on, 'data-act="gtg" data-f="silencio"')}</div>
+        <div class="ae ${cfg.glob.silencio.on ? '' : 'hidden'}"><span>Das</span><span class="ae-in"><input class="field sm" type="time" id="gde" value="${cfg.glob.silencio.de}"><span class="unit">às</span><input class="field sm" type="time" id="gate" value="${cfg.glob.silencio.ate}"></span></div>
+      </div>
+      <span class="hint">Avisos segurados no silêncio chegam juntos ao fim do horário, num resumo. O GitHub verifica a cada ~10 min.</span>
     </section>
 
     <details class="adv"><summary>RPC personalizado</summary><div class="rpc">
@@ -376,7 +432,9 @@ function syncText() {
 function payload() {
   const pos = {};
   for (const id of Object.keys(cfg.alerts)) { const a = alOf(id); if (Object.keys(a).length) pos[id] = a; }
-  return { v: 1, carteiras: cfg.wallets.map((w) => w.addr), redes: cfg.chains, borda: cfg.alertDefault, fee: cfg.feeDefault || 0, ntfy: cfg.ntfy, graph: cfg.graphKey || '', pos };
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Sao_Paulo';
+  return { v: 2, carteiras: cfg.wallets.map((w) => w.addr), redes: cfg.chains, ntfy: cfg.ntfy, graph: cfg.graphKey || '', tz,
+    def: cfg.def, glob: cfg.glob, borda: cfg.def.borda, fee: cfg.def.fee || 0, pos };
 }
 let syncTimer = null;
 function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 1500); }
@@ -432,22 +490,36 @@ $app.addEventListener('click', (e) => {
   else if (act === 'filter') { state.filter = el.dataset.v; store.set('filter', state.filter); render(); }
   else if (act === 'closed') { state.closedOpen = !state.closedOpen; render(); }
   else if (act === 'edit') { state.editing = el.dataset.id; render(); }
-  else if (act === 'al-' || act === 'al+') {
-    const id = el.dataset.id;
-    setAl(id, { borda: Math.max(1, Math.min(50, alertFor(id) + (act === 'al+' ? 1 : -1))) }); render();
-  } else if (act === 'al-dir') {
-    const id = el.dataset.id, a = alOf(id);
-    if (a.alvo) setAl(id, { alvo: { ...a.alvo, dir: el.dataset.v } });
-    else state.pendingDir = el.dataset.v;
-    el.parentElement.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === el));
+  else if (act === 'st') {
+    const b = el.parentElement.querySelector('b');
+    const v = Math.max(0, Math.min(50, (+b.dataset.v || 0) + (+el.dataset.d)));
+    b.dataset.v = v; b.textContent = v ? v + '%' : 'desl.';
+  } else if (act === 'seg') {
+    el.parentElement.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === el));
+  } else if (act === 'tg') {
+    const on = !el.classList.contains('on'); el.classList.toggle('on', on); el.setAttribute('aria-checked', on);
+  } else if (act === 'dtg') {
+    cfg.def[el.dataset.f] = !cfg.def[el.dataset.f]; saveDef(); render();
+  } else if (act === 'gtg') {
+    const f = el.dataset.f;
+    if (f === 'silencio') cfg.glob.silencio = { ...cfg.glob.silencio, on: !cfg.glob.silencio.on }; else cfg.glob[f] = !cfg.glob[f];
+    saveGlob(); render();
   } else if (act === 'al-ok') {
-    const box = el.closest('.alert-edit'), id = state.editing;
+    const box = el.closest('.alert-edit'), id = box?.dataset.id;
     if (box && id) {
-      const pv = parseNum(box.querySelector('[data-act="al-price"]').value);
-      const dir = box.querySelector('[data-act="al-dir"].on')?.dataset.v || 'abaixo';
-      setAl(id, { alvo: pv ? { dir, preco: pv } : null, fee: parseNum(box.querySelector('[data-act="al-fee"]').value) });
+      const q = (f) => box.querySelector(`[data-f="${f}"]`);
+      const seg = (f) => q(f).querySelector('button.on')?.dataset.v;
+      const preco = parseNum(q('preco').value), comp = parseNum(q('comp').value);
+      setAl(id, {
+        range: q('range').classList.contains('on'),
+        borda: +q('borda').dataset.v,
+        alvo: preco ? { dir: seg('dir') || 'abaixo', preco } : null,
+        fee: parseNum(q('fee').value), feeUsd: parseNum(q('feeUsd').value),
+        comp: comp ? { side: seg('side') || 'base', pct: Math.min(100, Math.round(comp)) } : null,
+        fora: parseNum(q('fora').value),
+      });
     }
-    state.editing = null; state.pendingDir = null; render();
+    state.editing = null; render();
   }
   else if (act === 'sortdir') { state.sort = { ...state.sort, desc: !state.sort.desc }; store.set('sort', state.sort); render(); }
   else if (act === 'ntfy-test') ntfyTest();
@@ -463,18 +535,16 @@ $app.addEventListener('change', (e) => {
     save('chains'); state.dirty = true; scheduleSync();
   } else if (el.dataset.act === 'sort') {
     state.sort = { k: el.value, desc: SORTS[el.value].desc }; store.set('sort', state.sort); render();
-  } else if (el.dataset.act === 'al-price') {
-    const id = el.dataset.id, v = parseNum(el.value), a = alOf(id);
-    setAl(id, { alvo: v ? { dir: a.alvo?.dir || state.pendingDir || 'abaixo', preco: v } : null });
-  } else if (el.dataset.act === 'al-fee') {
-    setAl(el.dataset.id, { fee: parseNum(el.value) });
-  } else if (el.dataset.act === 'rpc') {
+  } else if (el.dataset.def) {
+    const f = el.dataset.def, v = parseNum(el.value);
+    cfg.def[f] = f === 'borda' || f === 'comp' ? (v ? Math.min(f === 'borda' ? 50 : 100, Math.round(v)) : 0) : v || 0; saveDef();
+  } else if (el.id === 'glemb') { cfg.glob.lembrete = parseNum(el.value) || 0; saveGlob(); }
+  else if (el.id === 'gde' || el.id === 'gate') { cfg.glob.silencio = { ...cfg.glob.silencio, [el.id === 'gde' ? 'de' : 'ate']: el.value || (el.id === 'gde' ? '23:00' : '07:00') }; saveGlob(); }
+  else if (el.dataset.act === 'rpc') {
     const v = el.value.trim();
     if (v) cfg.rpc[el.dataset.k] = v; else delete cfg.rpc[el.dataset.k];
     save('rpc'); state.dirty = true;
   } else if (el.id === 'gkey') { cfg.graphKey = el.value.trim(); save('graphKey'); state.dirty = true; scheduleSync(); }
-  else if (el.id === 'adef') { const v = Math.round(+el.value); if (v >= 1 && v <= 50) { cfg.alertDefault = v; save('alertDefault'); scheduleSync(); } }
-  else if (el.id === 'fdef') { cfg.feeDefault = parseNum(el.value) || 0; save('feeDefault'); scheduleSync(); }
   else if (el.id === 'ntfy') { cfg.ntfy = el.value.trim(); save('ntfy'); scheduleSync(); }
   else if (el.id === 'ghtok' || el.id === 'ghrepo') {
     cfg.gh = { token: document.getElementById('ghtok').value.trim(), repo: document.getElementById('ghrepo').value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, '') };
