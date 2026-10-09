@@ -1,0 +1,50 @@
+name: Alertas de range
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # a cada ~10 min (o GitHub pode atrasar alguns minutos)
+  workflow_dispatch:           # botão "Run workflow" para testar na hora
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alertas
+  cancel-in-progress: false
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Restaurar último estado
+        uses: actions/cache/restore@v4
+        with:
+          path: .estado
+          key: estado-${{ github.run_id }}
+          restore-keys: estado-
+
+      - name: Verificar posições
+        run: node scripts/alertas.mjs
+        env:
+          ALERTAS: ${{ vars.ALERTAS }}
+          CARTEIRAS: ${{ secrets.CARTEIRAS }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          GRAPH_API_KEY: ${{ secrets.GRAPH_API_KEY }}
+          ALERTA_PADRAO: ${{ vars.ALERTA_PADRAO }}
+          LIMITES: ${{ vars.LIMITES }}
+          REDES: ${{ vars.REDES }}
+          APP_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+
+      - name: Salvar estado
+        if: always() && hashFiles('.estado/estado.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .estado
+          key: estado-${{ github.run_id }}
