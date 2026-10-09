@@ -2,7 +2,7 @@
 // Lê posições Uniswap v3 e v4 direto da blockchain (RPC público), usa The Graph
 // só para descobrir os IDs das posições v4 e DefiLlama para preços em US$.
 
-export const VERSION = '1.0.2';
+export const VERSION = '1.1.0';
 
 export const CHAINS = {
   ethereum: {
@@ -321,7 +321,9 @@ export function derive(p, prices, alertPct) {
   const inQuote = amtBase * price + amtQuote;
   const compBase = inQuote > 0 ? (amtBase * price) / inQuote : price <= pmin ? 1 : 0;
   const feeBase = invert ? fe1 : fe0, feeQuote = invert ? fe0 : fe1;
-  const feeYield = inQuote > 0 ? ((feeBase * price + feeQuote) / inQuote) * 100 : null;
+  // % de fee = fees a coletar ÷ valor da posição × 100 (em US$; sem preço, na moeda de cotação)
+  const feeYield = feesUsd != null && valueUsd > 0 ? (feesUsd / valueUsd) * 100
+    : inQuote > 0 ? ((feeBase * price + feeQuote) / inQuote) * 100 : null;
 
   const closed = p.liq === 0n;
   const inRange = p.tick >= p.tl && p.tick < p.tu;

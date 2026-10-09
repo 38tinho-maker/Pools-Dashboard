@@ -1,4 +1,4 @@
-import { VERSION, CHAINS, loadPositions, derive, keccak256 } from './core.js?v=1.0.2';
+import { VERSION, CHAINS, loadPositions, derive, keccak256 } from './core.js?v=1.1.0';
 
 // ---------- armazenamento local (só neste aparelho) ----------
 const store = {
@@ -11,8 +11,16 @@ const cfg = {
   chains: store.get('chains', Object.keys(CHAINS)),
   alerts: store.get('alerts', {}),
   alertDefault: store.get('alertDefault', 5),
+  feeDefault: store.get('feeDefault', 0),
   rpc: store.get('rpc', {}),
+  ntfy: store.get('ntfy', ''),
+  gh: store.get('gh', { token: '', repo: defaultRepo() }),
 };
+function defaultRepo() {
+  const m = location.hostname.match(/^([^.]+)\.github\.io$/);
+  const seg = location.pathname.split('/').filter(Boolean)[0];
+  return m && seg ? `${m[1]}/${seg}` : '';
+}
 const save = (k) => store.set(k, cfg[k]);
 // redes novas em versões futuras entram marcadas automaticamente
 {
@@ -21,7 +29,17 @@ const save = (k) => store.set(k, cfg[k]);
   if (fresh.length) { cfg.chains = [...new Set([...cfg.chains, ...fresh])]; save('chains'); }
   store.set('knownChains', Object.keys(CHAINS));
 }
-const alertFor = (id) => cfg.alerts[id] ?? cfg.alertDefault;
+// alerta por posição: { borda: %, alvo: { dir: 'abaixo'|'acima', preco }, fee: % }
+const alOf = (id) => { const a = cfg.alerts[id]; return typeof a === 'number' ? { borda: a } : { ...(a || {}) }; };
+const alertFor = (id) => alOf(id).borda ?? cfg.alertDefault;
+const feeFor = (id) => alOf(id).fee ?? (cfg.feeDefault || null);
+function setAl(id, patch) {
+  const a = { ...alOf(id), ...patch };
+  for (const k of Object.keys(a)) if (a[k] == null) delete a[k];
+  if (a.borda === cfg.alertDefault) delete a.borda;
+  if (Object.keys(a).length) cfg.alerts[id] = a; else delete cfg.alerts[id];
+  save('alerts'); scheduleSync();
+}
 
 const state = {
   view: location.hash === '#config' ? 'cfg' : 'main',
@@ -30,6 +48,8 @@ const state = {
   closedOpen: false, editing: null, dirty: false,
   demo: new URLSearchParams(location.search).has('demo'),
   cfgMsg: '',
+  sort: store.get('sort', { k: 'status', desc: false }),
+  sync: store.get('sync', null),
 };
 
 // ---------- utilidades ----------
@@ -38,9 +58,12 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const nf = (o) => new Intl.NumberFormat('pt-BR', o);
 const usd = (x) => (x == null ? '—' : 'US$ ' + nf({ minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(x));
 const usdShort = (x) => (x == null ? '—' : nf({ minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(x));
-const fmtP = (x) => (!isFinite(x) ? '—' : x >= 1000 ? nf({ maximumFractionDigits: 2 }).format(x) : nf({ maximumSignificantDigits: 6 }).format(x));
-const fmtE = (x) => (!isFinite(x) ? '—' : x >= 10000 ? nf({ maximumFractionDigits: 0 }).format(x) : nf({ maximumSignificantDigits: 5 }).format(x));
-const pct1 = (x) => nf({ maximumFractionDigits: 1 }).format(x) + '%';
+const fmtP = (x) => (!isFinite(x) ? '—' : x > 0 && x < 1e-6 ? tiny(x) : x >= 1000 ? nf({ maximumFractionDigits: 2 }).format(x) : nf({ maximumSignificantDigits: 6 }).format(x));
+const fmtE = (x) => (!isFinite(x) ? '—' : x > 0 && x < 1e-6 ? tiny(x) : x >= 10000 ? nf({ maximumFractionDigits: 0 }).format(x) : nf({ maximumSignificantDigits: 5 }).format(x));
+const tiny = (x) => x.toExponential(2).replace('.', ',');
+const pct1 = (x) => (!isFinite(x) ? '—' : x > 999 ? '>999%' : nf({ maximumFractionDigits: 1 }).format(x) + '%');
+const pct2 = (x) => (!isFinite(x) ? '—' : x > 999 ? '>999%' : nf({ minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(x) + '%');
+const parseNum = (v) => { let s = String(v || '').trim().replace(/\s/g, ''); if (!s) return null; if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.'); const n = parseFloat(s); return isFinite(n) && n > 0 ? n : null; };
 const short = (a) => a.slice(0, 6) + '…' + a.slice(-4);
 const walletName = (addr) => cfg.wallets.find((w) => w.addr.toLowerCase() === addr.toLowerCase())?.name || short(addr);
 
@@ -49,6 +72,7 @@ const ICON = {
   refresh: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>',
   back: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>',
   trash: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>',
+  sort: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16M3 16l4 4 4-4M17 20V4M13 8l4-4 4 4"/></svg>',
   chev: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
 };
 
@@ -96,6 +120,19 @@ const ST = {
   fora: { label: 'Fora do range', c: 'var(--bad)', t: 'var(--badT)' },
 };
 const ORDER = { fora: 0, perto: 1, range: 2 };
+const SORTS = {
+  status: { label: 'Status', desc: false, v: (p) => ORDER[statusOf(p)] * 1e12 - (p.valueUsd || 0) },
+  valor: { label: 'Valor', desc: true, v: (p) => p.valueUsd ?? -1 },
+  fees: { label: 'Fees (US$)', desc: true, v: (p) => p.feesUsd ?? -1 },
+  feepct: { label: 'Fee %', desc: true, v: (p) => (isFinite(p.feeYield) ? p.feeYield : -1) },
+  borda: { label: 'Distância da borda', desc: false, v: (p) => (p.status === 'fora' ? -p.dist : p.dist) },
+  rede: { label: 'Rede', desc: false, v: (p) => p.chainName + String(1e12 - Math.round(p.valueUsd || 0)).padStart(14, '0') },
+};
+function sortPositions(list) {
+  const s = SORTS[state.sort.k] || SORTS.status;
+  const out = [...list].sort((a, b) => { const x = s.v(a), y = s.v(b); return typeof x === 'string' ? x.localeCompare(y) : x - y; });
+  return state.sort.desc ? out.reverse() : out;
+}
 
 // ---------- render ----------
 function header() {
@@ -127,7 +164,9 @@ function ringCard(p) {
   const tick = Math.min(1, al / 25) * 100;
   const multi = cfg.wallets.length > 1 && state.filter === 'all';
   const fee = p.fee & 0x800000 ? 'taxa dinâmica' : nf({ maximumFractionDigits: 3 }).format(p.feePct) + '%';
-  const yieldTxt = p.feeYield != null && isFinite(p.feeYield) ? ` · ${nf({ minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(p.feeYield)}%` : '';
+  const yieldTxt = p.feeYield != null && isFinite(p.feeYield) ? ` · ${pct2(p.feeYield)}` : '';
+  const A = alOf(p.id), fAlvo = feeFor(p.id);
+  const extra = [A.alvo ? `preço ${A.alvo.dir === 'acima' ? '>' : '<'} ${fmtP(A.alvo.preco)}` : '', fAlvo ? `fee ≥ ${pct1(fAlvo)}` : ''].filter(Boolean).join(' · ');
   const feeTxt = (p.feesUsd != null ? `+ ${usdShort(p.feesUsd)} fees` : `+ ${Object.entries(p.fees).map(([k, v]) => fmtE(v) + ' ' + esc(k)).join(' · ')}`) + yieldTxt;
   const editing = state.editing === p.id;
   return `<article class="card">
@@ -152,13 +191,22 @@ function ringCard(p) {
         <span class="cur">atual ${fmtP(p.price)}</span>
       </div>
     </div>
-    ${editing ? `<div class="alert-edit"><span>Alerta perto da borda</span>
-      <span class="step"><button data-act="al-" data-id="${p.id}" aria-label="Diminuir">−</button><b>${al}%</b><button data-act="al+" data-id="${p.id}" aria-label="Aumentar">+</button></span>
-      <button class="ok" data-act="al-ok">OK</button></div>`
-    : `<button class="dist" data-act="edit" data-id="${p.id}" aria-label="Até a borda ${pct1(p.dist * 100)}; toque para ajustar o alerta (${al}%)">
+    ${editing ? `<div class="alert-edit">
+      <div class="ae"><span>Perto da borda</span>
+        <span class="step"><button data-act="al-" data-id="${p.id}" aria-label="Diminuir">−</button><b>${al}%</b><button data-act="al+" data-id="${p.id}" aria-label="Aumentar">+</button></span></div>
+      <div class="ae"><span>Preço alvo <small>${esc(p.base.symbol)} em ${esc(p.quote.symbol)}</small></span>
+        <span class="ae-in"><span class="seg" role="group" aria-label="Direção">
+          <button data-act="al-dir" data-id="${p.id}" data-v="abaixo" class="${(A.alvo?.dir || 'abaixo') === 'abaixo' ? 'on' : ''}">abaixo</button>
+          <button data-act="al-dir" data-id="${p.id}" data-v="acima" class="${A.alvo?.dir === 'acima' ? 'on' : ''}">acima</button></span>
+        <input class="field sm" data-act="al-price" data-id="${p.id}" inputmode="decimal" placeholder="${fmtP(p.price)}" value="${A.alvo ? fmtP(A.alvo.preco) : ''}" aria-label="Preço alvo"></span></div>
+      <div class="ae"><span>Fee % atingida</span>
+        <span class="ae-in"><input class="field sm" data-act="al-fee" data-id="${p.id}" inputmode="decimal" placeholder="${cfg.feeDefault ? nf({ maximumFractionDigits: 2 }).format(cfg.feeDefault) : 'desligado'}" value="${A.fee != null ? nf({ maximumFractionDigits: 2 }).format(A.fee) : ''}" aria-label="Fee % para avisar"><span>%</span></span></div>
+      <div class="ae end"><span class="hint">Deixe vazio para desligar.</span><button class="ok" data-act="al-ok">OK</button></div></div>`
+    : `<button class="dist" data-act="edit" data-id="${p.id}" aria-label="Até a borda ${pct1(p.dist * 100)}; toque para ajustar os alertas">
       <span class="lbl">${out ? 'Fora por' : 'Até a borda'}</span>
       <span class="bar"><i style="width:${fill.toFixed(0)}%;background:${st.c}"></i><em style="left:${tick.toFixed(0)}%"></em></span>
-      <span class="v" ${out ? 'style="color:var(--bad)"' : ''}>${pct1(p.dist * 100)}</span></button>`}
+      <span class="v" ${out ? 'style="color:var(--bad)"' : ''}>${pct1(p.dist * 100)}</span></button>
+      ${extra ? `<div class="alerts-on">Alertas: ${extra}</div>` : ''}`}
   </article>`;
 }
 
@@ -176,7 +224,7 @@ function mainView() {
 
   const d = state.data;
   const mine = d.positions.filter((p) => state.filter === 'all' || p.owner.toLowerCase() === state.filter);
-  const open = mine.filter((p) => !p.closed).sort((a, b) => ORDER[statusOf(a)] - ORDER[statusOf(b)] || (b.valueUsd || 0) - (a.valueUsd || 0));
+  const open = sortPositions(mine.filter((p) => !p.closed));
   const closed = mine.filter((p) => p.closed);
   const cnt = { range: 0, perto: 0, fora: 0 };
   open.forEach((p) => cnt[statusOf(p)]++);
@@ -201,6 +249,11 @@ function mainView() {
   if (d.errors?.length) h += `<div class="notice warn">${d.errors.map(esc).join('<br>')}</div>`;
   if (state.error) h += `<div class="notice warn">Última atualização falhou: ${esc(state.error)}</div>`;
   if (!open.length && !closed.length) h += `<div class="empty"><h2>Nenhuma posição encontrada</h2><p>Confira as carteiras e as redes nas configurações.</p></div>`;
+  if (open.length > 1) {
+    h += `<div class="sortbar"><label class="sortbtn"><span>Ordenar: <b>${SORTS[state.sort.k]?.label || 'Status'}</b></span>${ICON.chev}
+      <select data-act="sort" aria-label="Ordenar posições">${Object.entries(SORTS).map(([k, o]) => `<option value="${k}" ${k === state.sort.k ? 'selected' : ''}>${o.label}</option>`).join('')}</select></label>
+      <button class="icon-btn" data-act="sortdir" aria-label="Inverter ordem (${state.sort.desc ? 'decrescente' : 'crescente'})">${ICON.sort}</button></div>`;
+  }
   h += open.map(ringCard).join('');
   if (closed.length) {
     const cf = closed.reduce((s, p) => s + (p.feesUsd || 0), 0);
@@ -235,15 +288,19 @@ function cfgView() {
       ${Object.entries(CHAINS).map(([k, c]) => `<label><input type="checkbox" data-act="net" data-k="${k}" ${cfg.chains.includes(k) ? 'checked' : ''}>${c.name}</label>`).join('')}
     </div></section>
 
-    <section><h2><label for="adef">Alerta perto da borda</label></h2>
-      <div class="row2" style="align-items:center"><input class="field" id="adef" type="number" min="1" max="50" step="1" inputmode="numeric" value="${cfg.alertDefault}" style="width:90px"><span class="hint">% de distância padrão. Ajuste por posição tocando em "Até a borda".</span></div></section>
-
-    <section><h2>Alertas no iPhone (GitHub)</h2>
-      <span class="hint">Copie estes valores para o repositório no GitHub, como indicado no README.</span>
-      <div class="row2" style="flex-wrap:wrap">
-        <button class="copy" data-act="copy-wallets">Copiar CARTEIRAS</button>
-        <button class="copy" data-act="copy-limits">Copiar LIMITES</button>
-      </div></section>
+    <section><h2>Alertas no iPhone</h2>
+      <label class="lbl2" for="ntfy">Tópico do ntfy</label>
+      <div class="row2"><input class="field" id="ntfy" value="${esc(cfg.ntfy)}" placeholder="ex.: pools-marco-7f3k9q" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <button class="copy" data-act="ntfy-test">Testar</button></div>
+      <label class="lbl2" for="ghtok">Token do GitHub</label>
+      <input class="field" id="ghtok" type="password" value="${esc(cfg.gh.token)}" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label class="lbl2" for="ghrepo">Repositório</label>
+      <input class="field" id="ghrepo" value="${esc(cfg.gh.repo)}" placeholder="usuario/repositorio" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <span class="hint" id="syncst">${syncText()}</span>
+      <div class="row2" style="align-items:center;margin-top:6px"><input class="field" id="adef" type="number" min="1" max="50" step="1" inputmode="numeric" value="${cfg.alertDefault}" style="width:80px"><span class="hint">% padrão para "perto da borda"</span></div>
+      <div class="row2" style="align-items:center"><input class="field" id="fdef" inputmode="decimal" value="${cfg.feeDefault ? nf({ maximumFractionDigits: 2 }).format(cfg.feeDefault) : ''}" placeholder="—" style="width:80px"><span class="hint">% padrão de fee para avisar (vazio = desligado)</span></div>
+      <span class="hint">Cada posição pode ter seus próprios alertas: toque em "Até a borda" no cartão. Tudo é enviado sozinho para o GitHub, que verifica a cada ~10 min.</span>
+    </section>
 
     <details class="adv"><summary>RPC personalizado</summary><div class="rpc">
       ${Object.entries(CHAINS).map(([k, c]) => `<input class="field" data-act="rpc" data-k="${k}" placeholder="${c.name}: ${c.rpc}" value="${esc(cfg.rpc[k] || '')}" aria-label="RPC ${c.name}" autocapitalize="off" spellcheck="false">`).join('')}
@@ -308,11 +365,45 @@ function demoData() {
   return { positions, errors: [], needsGraphKey: false, updatedAt: Date.now() - 12000 };
 }
 
-// ---------- ações ----------
-async function copy(text) {
-  try { await navigator.clipboard.writeText(text); toast('Copiado'); }
-  catch { window.prompt('Copie o texto:', text); }
+// ---------- sincronização dos alertas com o GitHub ----------
+function syncText() {
+  if (!cfg.gh.token || !cfg.gh.repo) return 'Preencha o token e o repositório para os alertas funcionarem.';
+  const s = state.sync;
+  if (!s) return 'Ainda não sincronizado.';
+  const t = new Date(s.at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  return s.ok ? `Sincronizado em ${t}.` : `Falha ao sincronizar (${t}): ${s.msg}`;
 }
+function payload() {
+  const pos = {};
+  for (const id of Object.keys(cfg.alerts)) { const a = alOf(id); if (Object.keys(a).length) pos[id] = a; }
+  return { v: 1, carteiras: cfg.wallets.map((w) => w.addr), redes: cfg.chains, borda: cfg.alertDefault, fee: cfg.feeDefault || 0, ntfy: cfg.ntfy, graph: cfg.graphKey || '', pos };
+}
+let syncTimer = null;
+function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 1500); }
+async function syncNow() {
+  if (state.demo || !cfg.gh.token || !cfg.gh.repo) return;
+  const value = JSON.stringify(payload());
+  const base = `https://api.github.com/repos/${cfg.gh.repo}/actions/variables`;
+  const headers = { Authorization: `Bearer ${cfg.gh.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' };
+  try {
+    let r = await fetch(`${base}/ALERTAS`, { method: 'PATCH', headers, body: JSON.stringify({ name: 'ALERTAS', value }) });
+    if (r.status === 404) r = await fetch(base, { method: 'POST', headers, body: JSON.stringify({ name: 'ALERTAS', value }) });
+    if (!r.ok) throw new Error(r.status === 401 ? 'token inválido ou vencido' : r.status === 403 || r.status === 404 ? 'token sem permissão de Variables neste repositório' : 'erro ' + r.status);
+    state.sync = { ok: true, at: Date.now() };
+  } catch (e) { state.sync = { ok: false, at: Date.now(), msg: e.message }; }
+  store.set('sync', state.sync);
+  const el = document.getElementById('syncst'); if (el) el.textContent = syncText();
+  if (!state.sync.ok) toast('Alertas não sincronizados');
+}
+async function ntfyTest() {
+  if (!cfg.ntfy) return toast('Preencha o tópico');
+  try {
+    const r = await fetch('https://ntfy.sh', { method: 'POST', body: JSON.stringify({ topic: cfg.ntfy, title: 'Pools LP', message: 'Teste: as notificações estão funcionando.', tags: ['bell'] }) });
+    toast(r.ok ? 'Enviado — veja o ntfy' : 'Falhou: ' + r.status);
+  } catch { toast('Falha ao enviar'); }
+}
+
+// ---------- ações ----------
 function toast(msg) {
   const t = document.createElement('div');
   t.textContent = msg;
@@ -343,28 +434,52 @@ $app.addEventListener('click', (e) => {
   else if (act === 'edit') { state.editing = el.dataset.id; render(); }
   else if (act === 'al-' || act === 'al+') {
     const id = el.dataset.id;
-    cfg.alerts[id] = Math.max(1, Math.min(50, alertFor(id) + (act === 'al+' ? 1 : -1)));
-    if (cfg.alerts[id] === cfg.alertDefault) delete cfg.alerts[id];
-    save('alerts'); render();
-  } else if (act === 'al-ok') { state.editing = null; render(); }
+    setAl(id, { borda: Math.max(1, Math.min(50, alertFor(id) + (act === 'al+' ? 1 : -1))) }); render();
+  } else if (act === 'al-dir') {
+    const id = el.dataset.id, a = alOf(id);
+    if (a.alvo) setAl(id, { alvo: { ...a.alvo, dir: el.dataset.v } });
+    else state.pendingDir = el.dataset.v;
+    el.parentElement.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === el));
+  } else if (act === 'al-ok') {
+    const box = el.closest('.alert-edit'), id = state.editing;
+    if (box && id) {
+      const pv = parseNum(box.querySelector('[data-act="al-price"]').value);
+      const dir = box.querySelector('[data-act="al-dir"].on')?.dataset.v || 'abaixo';
+      setAl(id, { alvo: pv ? { dir, preco: pv } : null, fee: parseNum(box.querySelector('[data-act="al-fee"]').value) });
+    }
+    state.editing = null; state.pendingDir = null; render();
+  }
+  else if (act === 'sortdir') { state.sort = { ...state.sort, desc: !state.sort.desc }; store.set('sort', state.sort); render(); }
+  else if (act === 'ntfy-test') ntfyTest();
   else if (act === 'demo-on') { state.demo = true; refresh(); }
   else if (act === 'demo-off') { state.demo = false; state.data = null; history.replaceState(null, '', location.pathname); refresh(); }
-  else if (act === 'wdel') { cfg.wallets.splice(+el.dataset.i, 1); save('wallets'); state.dirty = true; render(); }
-  else if (act === 'copy-wallets') copy(cfg.wallets.map((w) => w.addr).join(','));
-  else if (act === 'copy-limits') copy(JSON.stringify(cfg.alerts));
+  else if (act === 'wdel') { cfg.wallets.splice(+el.dataset.i, 1); save('wallets'); state.dirty = true; scheduleSync(); render(); }
 });
 $app.addEventListener('change', (e) => {
   const el = e.target;
   if (el.dataset.act === 'net') {
     const k = el.dataset.k;
     cfg.chains = el.checked ? [...new Set([...cfg.chains, k])] : cfg.chains.filter((x) => x !== k);
-    save('chains'); state.dirty = true;
+    save('chains'); state.dirty = true; scheduleSync();
+  } else if (el.dataset.act === 'sort') {
+    state.sort = { k: el.value, desc: SORTS[el.value].desc }; store.set('sort', state.sort); render();
+  } else if (el.dataset.act === 'al-price') {
+    const id = el.dataset.id, v = parseNum(el.value), a = alOf(id);
+    setAl(id, { alvo: v ? { dir: a.alvo?.dir || state.pendingDir || 'abaixo', preco: v } : null });
+  } else if (el.dataset.act === 'al-fee') {
+    setAl(el.dataset.id, { fee: parseNum(el.value) });
   } else if (el.dataset.act === 'rpc') {
     const v = el.value.trim();
     if (v) cfg.rpc[el.dataset.k] = v; else delete cfg.rpc[el.dataset.k];
     save('rpc'); state.dirty = true;
-  } else if (el.id === 'gkey') { cfg.graphKey = el.value.trim(); save('graphKey'); state.dirty = true; }
-  else if (el.id === 'adef') { const v = Math.round(+el.value); if (v >= 1 && v <= 50) { cfg.alertDefault = v; save('alertDefault'); } }
+  } else if (el.id === 'gkey') { cfg.graphKey = el.value.trim(); save('graphKey'); state.dirty = true; scheduleSync(); }
+  else if (el.id === 'adef') { const v = Math.round(+el.value); if (v >= 1 && v <= 50) { cfg.alertDefault = v; save('alertDefault'); scheduleSync(); } }
+  else if (el.id === 'fdef') { cfg.feeDefault = parseNum(el.value) || 0; save('feeDefault'); scheduleSync(); }
+  else if (el.id === 'ntfy') { cfg.ntfy = el.value.trim(); save('ntfy'); scheduleSync(); }
+  else if (el.id === 'ghtok' || el.id === 'ghrepo') {
+    cfg.gh = { token: document.getElementById('ghtok').value.trim(), repo: document.getElementById('ghrepo').value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, '') };
+    save('gh'); syncNow();
+  }
 });
 $app.addEventListener('submit', (e) => {
   if (e.target.id !== 'wform') return;
@@ -376,7 +491,7 @@ $app.addEventListener('submit', (e) => {
   if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) return err('Endereço inválido: use 0x seguido de 40 caracteres.');
   if (cfg.wallets.some((w) => w.addr.toLowerCase() === addr.toLowerCase())) return err('Essa carteira já está na lista.');
   cfg.wallets.push({ name: name || `Carteira ${cfg.wallets.length + 1}`, addr });
-  save('wallets'); state.dirty = true; state.cfgMsg = ''; render();
+  save('wallets'); state.dirty = true; state.cfgMsg = ''; scheduleSync(); render();
 });
 
 // ---------- ciclo ----------

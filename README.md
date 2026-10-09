@@ -1,4 +1,4 @@
-# Pools LP · v1.0.2
+# Pools LP · v1.1.0
 
 Painel das suas posições de liquidez na **Uniswap v3 e v4** (Ethereum, Arbitrum, Base, Polygon e Monad), feito para abrir no iPhone. Os alertas chegam como notificação pelo app **ntfy**.
 
@@ -39,30 +39,30 @@ Para ver sem configurar nada, abra o site com `?demo` no fim do endereço.
 
 ## 3. Alertas no iPhone (ntfy + GitHub Actions)
 
-O GitHub verifica suas posições a cada ~10 minutos e manda notificação **só quando algo muda**: a posição ficou perto da borda, saiu do range ou voltou ao range.
+O GitHub verifica suas posições a cada ~10 minutos e avisa **só quando algo muda**:
 
-1. Instale o app **ntfy** no iPhone (App Store, grátis).
-2. No app, toque em **+** e assine um tópico com um nome difícil de adivinhar, por exemplo `pools-marco-7f3k9q2x`. O nome do tópico funciona como senha: quem souber o nome recebe os avisos.
-3. No GitHub, abra **Settings → Secrets and variables → Actions**.
-4. Na aba **Secrets**, clique em *New repository secret* e crie:
+- **saiu do range** e **entrou no range**;
+- **perto da borda**: o % que você ajusta em cada cartão;
+- **preço alvo** cruzado (acima ou abaixo de um valor seu);
+- **fees a coletar** atingiram X% do valor da posição.
 
-| Nome | Valor |
-|---|---|
-| `CARTEIRAS` | endereços separados por vírgula. No app, use **Configurações → Copiar CARTEIRAS** |
-| `NTFY_TOPIC` | o nome do tópico do passo 2 |
-| `GRAPH_API_KEY` | sua chave do The Graph (necessária para posições v4) |
+Os alertas de cada posição se ajustam no próprio cartão: toque em **Até a borda**. Tudo é enviado sozinho para o GitHub.
 
-5. Na aba **Variables** (opcional), crie:
+### Configuração (uma vez só)
 
-| Nome | Valor |
-|---|---|
-| `ALERTA_PADRAO` | % de distância para "perto da borda" (padrão `5`) |
-| `LIMITES` | limites por posição. No app, use **Configurações → Copiar LIMITES** |
-| `REDES` | redes a verificar, ex.: `arbitrum,base` (padrão: todas) |
+1. **ntfy:** instale o app **ntfy** no iPhone (grátis) e assine um tópico difícil de adivinhar, ex.: `pools-marco-7f3k9q2x`.
+2. **Arquivo de agendamento:** no repositório, use **Add file → Create new file**. No nome, digite `.github/workflows/alertas.yml` e cole o conteúdo do arquivo de mesmo nome que veio no zip. Clique em **Commit changes**.
+3. **Token do GitHub:**
+   - Acesse https://github.com/settings/personal-access-tokens/new.
+   - Dê um nome (ex.: *pools-lp*) e escolha a validade mais longa.
+   - Em *Repository access*, marque **Only select repositories** e escolha este repositório.
+   - Em *Permissions → Repository permissions*, deixe **Variables** como **Read and write**.
+   - Clique em **Generate token** e copie o código (`github_pat_…`).
+4. **No app:** abra Configurações e, em **Alertas no iPhone**, preencha o tópico do ntfy (toque em **Testar**), o token e o repositório. Deve aparecer "Sincronizado em …".
+5. **Teste:** no GitHub, vá em **Actions → Alertas de range → Run workflow**. Chega a notificação "Alertas ativados".
 
-6. Vá em **Actions → Alertas de range → Run workflow** para testar. Na primeira execução chega a notificação "Alertas ativados".
-
-> Os secrets ficam ocultos mesmo com o repositório público, e o log do Actions não imprime endereços nem valores.
+> O token fica salvo só no iPhone e só consegue alterar as variáveis deste repositório. As configurações de alerta, incluindo carteiras e tópico, ficam numa variável do repositório chamada `ALERTAS`. Ela só é visível para você, mesmo com o repositório público. O log do Actions não imprime endereços nem valores.
+> Se a sua chave do The Graph tiver restrição de domínio, as posições **v4** não entram nos alertas. Nesse caso, crie uma segunda chave sem restrição e salve como secret `GRAPH_API_KEY`.
 
 ## Limitações
 
