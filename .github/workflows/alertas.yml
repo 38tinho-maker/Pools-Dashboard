@@ -2,11 +2,12 @@ name: Alertas de range
 
 on:
   schedule:
-    - cron: '*/10 * * * *'   # a cada ~10 min (o GitHub pode atrasar alguns minutos)
-  workflow_dispatch:           # botão "Run workflow" para testar na hora
+    - cron: '*/30 * * * *'   # reserva: religa a corrente se ela parar
+  workflow_dispatch:           # botão "Run workflow"
 
 permissions:
   contents: read
+  actions: write               # para a execução disparar a próxima sozinha
 
 concurrency:
   group: alertas
@@ -15,7 +16,7 @@ concurrency:
 jobs:
   verificar:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -30,8 +31,14 @@ jobs:
           key: estado-${{ github.run_id }}
           restore-keys: estado-
 
-      - name: Verificar posições
-        run: node scripts/alertas.mjs
+      - name: Verificar a cada 5 minutos (por ~55 min)
+        run: |
+          fim=$((SECONDS + 55*60))
+          while true; do
+            node scripts/alertas.mjs || echo "falha nesta verificação, tentando de novo em 5 min"
+            [ $((SECONDS + 300)) -ge $fim ] && break
+            sleep 300
+          done
         env:
           ALERTAS: ${{ vars.ALERTAS }}
           CARTEIRAS: ${{ secrets.CARTEIRAS }}
@@ -48,3 +55,9 @@ jobs:
         with:
           path: .estado
           key: estado-${{ github.run_id }}
+
+      - name: Disparar a próxima execução
+        if: always()
+        run: gh workflow run alertas.yml --ref "${{ github.ref_name }}" -R "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
