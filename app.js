@@ -1,4 +1,4 @@
-import { VERSION, CHAINS, loadPositions, derive, keccak256 } from './core.js?v=1.2.0';
+import { VERSION, CHAINS, loadPositions, derive, keccak256 } from './core.js?v=1.2.1';
 
 // ---------- armazenamento local (só neste aparelho) ----------
 const store = {
@@ -312,7 +312,8 @@ function cfgView() {
       </form></section>
 
     <section><h2><label for="gkey">Chave The Graph</label></h2>
-      <input class="field" id="gkey" type="password" value="${esc(cfg.graphKey)}" placeholder="Cole sua chave" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="row2"><input class="field secret" id="gkey" name="lp-graph-key" type="text" value="${esc(cfg.graphKey)}" placeholder="Cole sua chave" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true"><button class="copy" data-act="reveal" data-for="gkey">Mostrar</button></div>
+      <span class="err" id="gkerr">${gkMsg()}</span>
       <span class="hint">Necessária para posições v4. Grátis em thegraph.com/studio. Salva só neste aparelho.</span></section>
 
     <section><h2>Redes</h2><div class="nets">
@@ -324,7 +325,8 @@ function cfgView() {
       <div class="row2"><input class="field" id="ntfy" value="${esc(cfg.ntfy)}" placeholder="ex.: pools-marco-7f3k9q" autocomplete="off" autocapitalize="off" spellcheck="false">
         <button class="copy" data-act="ntfy-test">Testar</button></div>
       <label class="lbl2" for="ghtok">Token do GitHub</label>
-      <input class="field" id="ghtok" type="password" value="${esc(cfg.gh.token)}" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="row2"><input class="field secret" id="ghtok" name="lp-gh-token" type="text" value="${esc(cfg.gh.token)}" placeholder="ghp_… ou github_pat_…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true"><button class="copy" data-act="reveal" data-for="ghtok">Mostrar</button></div>
+      <span class="err" id="tkerr">${tkMsg()}</span>
       <label class="lbl2" for="ghrepo">Repositório</label>
       <input class="field" id="ghrepo" value="${esc(cfg.gh.repo)}" placeholder="usuario/repositorio" autocomplete="off" autocapitalize="off" spellcheck="false">
       <span class="hint" id="syncst">${syncText()}</span>
@@ -422,6 +424,9 @@ function demoData() {
 }
 
 // ---------- sincronização dos alertas com o GitHub ----------
+const TOKEN_RE = /^(ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})$/;
+const gkMsg = () => (cfg.graphKey && !/^[a-f0-9]{32}$/i.test(cfg.graphKey) ? 'Essa chave não parece do The Graph (32 letras e números). Cole de novo.' : '');
+const tkMsg = () => (cfg.gh.token && !TOKEN_RE.test(cfg.gh.token) ? 'Isso não parece um token do GitHub (começa com ghp_ ou github_pat_). Cole de novo.' : '');
 function syncText() {
   if (!cfg.gh.token || !cfg.gh.repo) return 'Preencha o token e o repositório para os alertas funcionarem.';
   const s = state.sync;
@@ -440,6 +445,7 @@ let syncTimer = null;
 function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 1500); }
 async function syncNow() {
   if (state.demo || !cfg.gh.token || !cfg.gh.repo) return;
+  if (!TOKEN_RE.test(cfg.gh.token)) { state.sync = { ok: false, at: Date.now(), msg: 'o campo não contém um token do GitHub' }; store.set('sync', state.sync); const el = document.getElementById('syncst'); if (el) el.textContent = syncText(); return; }
   const value = JSON.stringify(payload());
   const base = `https://api.github.com/repos/${cfg.gh.repo}/actions/variables`;
   const headers = { Authorization: `Bearer ${cfg.gh.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' };
@@ -523,6 +529,7 @@ $app.addEventListener('click', (e) => {
   }
   else if (act === 'sortdir') { state.sort = { ...state.sort, desc: !state.sort.desc }; store.set('sort', state.sort); render(); }
   else if (act === 'ntfy-test') ntfyTest();
+  else if (act === 'reveal') { const i = document.getElementById(el.dataset.for); const show = i.classList.toggle('shown'); el.textContent = show ? 'Ocultar' : 'Mostrar'; }
   else if (act === 'demo-on') { state.demo = true; refresh(); }
   else if (act === 'demo-off') { state.demo = false; state.data = null; history.replaceState(null, '', location.pathname); refresh(); }
   else if (act === 'wdel') { cfg.wallets.splice(+el.dataset.i, 1); save('wallets'); state.dirty = true; scheduleSync(); render(); }
@@ -544,11 +551,12 @@ $app.addEventListener('change', (e) => {
     const v = el.value.trim();
     if (v) cfg.rpc[el.dataset.k] = v; else delete cfg.rpc[el.dataset.k];
     save('rpc'); state.dirty = true;
-  } else if (el.id === 'gkey') { cfg.graphKey = el.value.trim(); save('graphKey'); state.dirty = true; scheduleSync(); }
+  } else if (el.id === 'gkey') { cfg.graphKey = el.value.trim(); save('graphKey'); state.dirty = true; scheduleSync(); const e2 = document.getElementById('gkerr'); if (e2) e2.textContent = gkMsg(); }
   else if (el.id === 'ntfy') { cfg.ntfy = el.value.trim(); save('ntfy'); scheduleSync(); }
   else if (el.id === 'ghtok' || el.id === 'ghrepo') {
     cfg.gh = { token: document.getElementById('ghtok').value.trim(), repo: document.getElementById('ghrepo').value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, '') };
     save('gh'); syncNow();
+    const e3 = document.getElementById('tkerr'); if (e3) e3.textContent = tkMsg();
   }
 });
 $app.addEventListener('submit', (e) => {

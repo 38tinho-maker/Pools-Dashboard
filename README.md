@@ -1,4 +1,4 @@
-# Pools LP · v1.2.0
+# Pools LP · v1.2.1
 
 Painel das suas posições de liquidez na **Uniswap v3 e v4** (Ethereum, Arbitrum, Base, Polygon e Monad), feito para abrir no iPhone. Os alertas chegam como notificação pelo app **ntfy**.
 

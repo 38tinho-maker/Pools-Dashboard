@@ -173,3 +173,5 @@ details.adv .rpc { display: flex; flex-direction: column; gap: 6px; margin-top: 
 .group.pad .ae { flex-wrap: nowrap; }
 .group.pad .ae > span:first-child, .alert-edit .ae > span:first-child { flex: 1; min-width: 0; }
 .field[type=time] { width: 112px; }
+.secret { -webkit-text-security: disc; font-family: 'Geist Mono', monospace; }
+.secret.shown { -webkit-text-security: none; }
